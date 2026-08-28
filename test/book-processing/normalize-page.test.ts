@@ -9,7 +9,6 @@ import { afterEach, describe, expect, test } from 'vitest'
 import type {
   AvailablePageSource,
   NormalizedRegion,
-  ProcessingProvenance,
   ProcessorIdentity,
   RawBlockKind,
   RawCodexPage,
@@ -40,21 +39,6 @@ const processor: ProcessorIdentity = {
   outputSchemaSha256: 'b'.repeat(64),
   normalizerVersion: '1',
   configurationHash: 'c'.repeat(64)
-}
-
-const provenance: ProcessingProvenance = {
-  runnerKind: 'codex-cli',
-  codexCliVersion: '0.1.0',
-  requestedModel: 'cli-default',
-  promptVersion: '1',
-  outputSchemaVersion: '1',
-  normalizerVersion: '1',
-  configurationHash: processor.configurationHash,
-  pageCacheKey: 'd'.repeat(64),
-  runId: 'run-1',
-  batchId: 'batch-1',
-  attempts: 1,
-  completedAt: '2026-08-27T00:00:00.000Z'
 }
 
 async function createOutDirWithSyntheticPage(): Promise<{
@@ -157,7 +141,6 @@ describe('normalizePage', () => {
       page,
       source,
       processor,
-      provenance,
       asin,
       editionVersion,
       outDir
@@ -186,7 +169,6 @@ describe('normalizePage', () => {
       page: rawPageWithImage({ regionConfidence: 'low' }),
       source,
       processor,
-      provenance,
       asin,
       editionVersion,
       outDir
@@ -205,7 +187,6 @@ describe('normalizePage', () => {
       page: rawPageWithImage({ region: null }),
       source,
       processor,
-      provenance,
       asin,
       editionVersion,
       outDir
@@ -227,7 +208,6 @@ describe('normalizePage', () => {
       }),
       source,
       processor,
-      provenance,
       asin,
       editionVersion,
       outDir
@@ -246,7 +226,6 @@ describe('normalizePage', () => {
       page: rawPageWithImage({ regionConfidence: 'low', imageKind: 'table' }),
       source,
       processor,
-      provenance,
       asin,
       editionVersion,
       outDir
@@ -264,7 +243,6 @@ describe('normalizePage', () => {
       page: rawPageWithImage({ regionConfidence: 'low' }),
       source,
       processor,
-      provenance,
       asin,
       editionVersion,
       outDir
@@ -325,7 +303,6 @@ describe('normalizePage', () => {
       page,
       source,
       processor,
-      provenance,
       asin,
       editionVersion,
       outDir
@@ -347,7 +324,6 @@ describe('normalizePage', () => {
       page,
       source,
       processor,
-      provenance,
       asin,
       editionVersion,
       outDir
@@ -370,7 +346,6 @@ describe('normalizePage', () => {
       page,
       source,
       processor,
-      provenance,
       asin,
       editionVersion,
       outDir
@@ -410,7 +385,6 @@ describe('normalizePage', () => {
       page,
       source,
       processor,
-      provenance,
       asin,
       editionVersion,
       outDir
@@ -419,7 +393,6 @@ describe('normalizePage', () => {
       page,
       source,
       processor: { ...processor, configurationHash: 'f'.repeat(64) },
-      provenance,
       asin,
       editionVersion,
       outDir

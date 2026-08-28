@@ -2,7 +2,6 @@ import type {
   AvailablePageSource,
   NormalizedBlock,
   NormalizedPageDocument,
-  ProcessingProvenance,
   ProcessorIdentity,
   RawCodexPage
 } from './types'
@@ -13,10 +12,6 @@ export interface NormalizePageInput {
   page: RawCodexPage
   source: AvailablePageSource
   processor: ProcessorIdentity
-  /** Accepted for interface completeness with the wider checkpoint record;
-   * normalization itself derives citations only from source/processor
-   * identity, not run provenance (attempts, run/batch IDs, timestamps). */
-  provenance: ProcessingProvenance
   asin: string
   editionVersion: string
   /** Book output directory; screenshots are read and crop assets are

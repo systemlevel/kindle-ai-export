@@ -116,7 +116,12 @@ export async function createMediaAsset(
       .extract(pixelCrop)
       .png()
       .toBuffer()
-  } catch {
+  } catch (err) {
+    console.error(
+      `media crop failed for ${source.captureId}/${blockId} at ${screenshotAbsolutePath}: ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    )
     return null
   }
 
@@ -130,14 +135,24 @@ export async function createMediaAsset(
   try {
     await fs.mkdir(path.dirname(assetAbsolutePath), { recursive: true })
     await fs.writeFile(assetAbsolutePath, croppedBuffer, { mode: 0o600 })
-  } catch {
+  } catch (err) {
+    console.error(
+      `media crop failed for ${source.captureId}/${blockId} at ${assetAbsolutePath}: ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    )
     return null
   }
 
   let metadata: sharp.Metadata
   try {
     metadata = await sharp(assetAbsolutePath).metadata()
-  } catch {
+  } catch (err) {
+    console.error(
+      `media crop failed for ${source.captureId}/${blockId} at ${assetAbsolutePath}: ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    )
     return null
   }
   if (metadata.format !== 'png' || !metadata.width || !metadata.height) {

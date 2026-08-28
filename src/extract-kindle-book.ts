@@ -274,11 +274,11 @@ async function main() {
   // If we're on the signin page, start the authentication flow.
   if (/\/ap\/signin/g.test(new URL(page.url()).pathname)) {
     await page.locator('input[type="email"]').fill(amazonEmail)
-    await page.locator('input[type="submit"]').click()
+    await page.locator('input#continue').click()
 
     await page.locator('input[type="password"]').fill(amazonPassword)
     // await page.locator('input[type="checkbox"]').click()
-    await page.locator('input[type="submit"]').click()
+    await page.locator('input#signInSubmit').click()
 
     if (!/\/kindle-library/g.test(new URL(page.url()).pathname)) {
       const code = await input({

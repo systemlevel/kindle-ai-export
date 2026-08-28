@@ -199,7 +199,8 @@ describe('createCheckpointStore', () => {
   test('readReusable treats a missing warnings array as a corrupt succeeded checkpoint', async () => {
     const outDir = await createOutDir()
     const store = await createCheckpointStore(outDir)
-    const { warnings, ...documentWithoutWarnings } = successCheckpoint.document
+    const { warnings: _omitWarnings, ...documentWithoutWarnings } =
+      successCheckpoint.document
     await fs.writeFile(
       path.join(outDir, 'page-documents', 'c000000.json'),
       `${JSON.stringify({

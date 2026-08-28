@@ -101,5 +101,11 @@ if (scenario === 'wrong-page-ids') {
   process.exit(0)
 }
 
+if (scenario === 'result-overflow') {
+  if (outputPath) fs.writeFileSync(outputPath, 'x'.repeat(2_048), { mode: 0o600 })
+  event({ type: 'turn.completed' })
+  process.exit(0)
+}
+
 writeOutput(validOutput(pageIds))
 event({ type: 'turn.completed' })

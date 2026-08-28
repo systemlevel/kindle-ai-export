@@ -2,7 +2,7 @@
 
 import type { Readable } from 'node:stream'
 import { type ChildProcessByStdio, spawn } from 'node:child_process'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 import type {
@@ -145,11 +145,12 @@ export async function runCodexBatch(
         'Could not initialize private result storage'
       )
     }
+    const limits = limitsFor(options)
     const execution = await runCommand(
       options.codexBin,
       buildCodexArgs(input, runDirectory, resultPath),
       options.env ?? process.env,
-      limitsFor(options),
+      limits,
       runDirectory
     )
     const executionSummary = executionSummaryOf(execution)
@@ -160,6 +161,40 @@ export async function runCodexBatch(
         failure: executionFailure,
         execution: executionSummary
       }
+
+    // The result file is written by the Codex CLI (untrusted output) and is
+    // never streamed through the byte-capped stdout/stderr collectors, so it
+    // must be size-checked before being buffered into memory. Reuse the same
+    // cap as stdout so a misbehaving process can't force an unbounded read.
+    let resultSize: number
+    try {
+      resultSize = (await stat(resultPath)).size
+    } catch (err) {
+      const code = isMissingFile(err) ? 'missing-output' : 'malformed-output'
+      return {
+        ok: false,
+        failure: createFailure(
+          'protocol',
+          code,
+          outputMessageFor(code),
+          execution
+        ),
+        execution: executionSummary
+      }
+    }
+
+    if (resultSize > limits.stdoutMaxBytes) {
+      return {
+        ok: false,
+        failure: createFailure(
+          'diagnostic-overflow',
+          'result-overflow',
+          'Codex result file exceeded its configured size limit',
+          execution
+        ),
+        execution: executionSummary
+      }
+    }
 
     let resultText: string
     try {

@@ -199,7 +199,8 @@ describe('runCodexBatch', () => {
     ['nonzero', 'protocol', 'process-exit'],
     ['rate-limit', 'transient-service', 'service-unavailable'],
     ['stderr-overflow', 'diagnostic-overflow', 'stderr-overflow'],
-    ['stdout-overflow', 'diagnostic-overflow', 'stdout-overflow']
+    ['stdout-overflow', 'diagnostic-overflow', 'stdout-overflow'],
+    ['result-overflow', 'diagnostic-overflow', 'result-overflow']
   ])(
     'returns a bounded typed failure for %s',
     async (scenario, category, code) => {
@@ -207,6 +208,22 @@ describe('runCodexBatch', () => {
       expect(result).toMatchObject({ ok: false, failure: { category, code } })
     }
   )
+
+  test('rejects an oversized result file without parsing its contents', async () => {
+    // The fake Codex writes a result file full of non-JSON bytes ('x'
+    // repeated) that exceeds stdoutMaxBytes. If the runner ever read and
+    // JSON.parse'd it, that would surface as a 'malformed-output' failure
+    // instead of the overflow rejected here before any read occurs.
+    const { result } = await runScenario('result-overflow')
+    expect(result).toMatchObject({
+      ok: false,
+      failure: { category: 'diagnostic-overflow', code: 'result-overflow' }
+    })
+    if (!result.ok) {
+      expect(result.failure.code).not.toBe('malformed-output')
+      expect(result.failure.message).not.toContain('x'.repeat(32))
+    }
+  })
 
   test('terminates a hung process after the timeout', async () => {
     const { pidPath, result } = await runScenario('hang-ignore-term', {

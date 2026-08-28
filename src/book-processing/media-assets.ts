@@ -118,7 +118,7 @@ export async function createMediaAsset(
       .toBuffer()
   } catch (err) {
     console.error(
-      `media crop failed for ${source.captureId}/${blockId} at ${screenshotAbsolutePath}: ${
+      `media crop (extract) failed for ${source.captureId}/${blockId} at ${screenshotAbsolutePath}: ${
         err instanceof Error ? err.message : String(err)
       }`
     )
@@ -135,9 +135,13 @@ export async function createMediaAsset(
   try {
     await fs.mkdir(path.dirname(assetAbsolutePath), { recursive: true })
     await fs.writeFile(assetAbsolutePath, croppedBuffer, { mode: 0o600 })
+    // fs.writeFile only applies `mode` when creating a new file, so an
+    // overwrite of a pre-existing crop asset would silently keep its old
+    // permissions. Force 0600 unconditionally after every write.
+    await fs.chmod(assetAbsolutePath, 0o600)
   } catch (err) {
     console.error(
-      `media crop failed for ${source.captureId}/${blockId} at ${assetAbsolutePath}: ${
+      `media crop (write) failed for ${source.captureId}/${blockId} at ${assetAbsolutePath}: ${
         err instanceof Error ? err.message : String(err)
       }`
     )
@@ -149,7 +153,7 @@ export async function createMediaAsset(
     metadata = await sharp(assetAbsolutePath).metadata()
   } catch (err) {
     console.error(
-      `media crop failed for ${source.captureId}/${blockId} at ${assetAbsolutePath}: ${
+      `media crop (verify) failed for ${source.captureId}/${blockId} at ${assetAbsolutePath}: ${
         err instanceof Error ? err.message : String(err)
       }`
     )

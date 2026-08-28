@@ -377,6 +377,83 @@ describe('normalizePage', () => {
     expect(writtenMetadata.height).toBe(50)
   })
 
+  test('crop dimensions equal the floor/ceil pixel rectangle computed from the region', async () => {
+    const outDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'kindle-normalize-page-')
+    )
+    temporaryDirectories.push(outDir)
+    await fs.mkdir(path.join(outDir, 'pages'), { recursive: true })
+
+    // Deliberately non-round source dimensions and region bounds so the
+    // floor/ceil pixel conversion in pixelCropFor doesn't collapse to a
+    // trivial exact multiple.
+    const sourceWidth = 137
+    const sourceHeight = 101
+    const png = await sharp({
+      create: {
+        width: sourceWidth,
+        height: sourceHeight,
+        channels: 4,
+        background: '#123456ff'
+      }
+    })
+      .png()
+      .toBuffer()
+
+    const screenshotPath = 'pages/0000-0002.png'
+    await fs.writeFile(path.join(outDir, screenshotPath), png)
+
+    const source: AvailablePageSource = {
+      captureId: 'c000001',
+      index: 0,
+      printedPage: 1,
+      position: null,
+      screenshotPath,
+      rendererBatch: null,
+      availability: 'available',
+      screenshotSha256: createHash('sha256').update(png).digest('hex'),
+      width: sourceWidth,
+      height: sourceHeight
+    }
+
+    const region: NormalizedRegion = { x: 210, y: 130, width: 460, height: 540 }
+    const page = rawPageWithImage({ region, regionConfidence: 'high' })
+
+    const result = await normalizePage({
+      page,
+      source,
+      processor,
+      asin,
+      editionVersion,
+      outDir
+    })
+
+    // Mirrors pixelCropFor in media-assets.ts: floor the top-left corner,
+    // ceil the bottom-right corner (before edge clamping, which doesn't
+    // engage for this in-bounds region).
+    const expectedLeft = Math.floor((region.x / 1000) * sourceWidth)
+    const expectedTop = Math.floor((region.y / 1000) * sourceHeight)
+    const expectedRight = Math.ceil(
+      ((region.x + region.width) / 1000) * sourceWidth
+    )
+    const expectedBottom = Math.ceil(
+      ((region.y + region.height) / 1000) * sourceHeight
+    )
+    const expectedWidth = expectedRight - expectedLeft
+    const expectedHeight = expectedBottom - expectedTop
+
+    const mediaAsset = result.blocks[1]!.mediaAsset
+    expect(mediaAsset).not.toBeNull()
+    expect(mediaAsset!.pixelCrop).toEqual({
+      left: expectedLeft,
+      top: expectedTop,
+      width: expectedWidth,
+      height: expectedHeight
+    })
+    expect(mediaAsset!.width).toBe(expectedWidth)
+    expect(mediaAsset!.height).toBe(expectedHeight)
+  })
+
   test('produces a different citation id when processor configuration changes', async () => {
     const { outDir, source } = await createOutDirWithSyntheticPage()
     const page = rawPageWithImage({ regionConfidence: 'low' })

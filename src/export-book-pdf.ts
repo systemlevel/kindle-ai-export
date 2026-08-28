@@ -135,14 +135,25 @@ function renderImageItem(
   if (item.path) {
     const contentWidth =
       doc.page.width - doc.page.margins.left - doc.page.margins.right
-    // Only `width` is passed, so PDFKit scales the image's height
-    // proportionally - the crop's aspect ratio is preserved while its
-    // rendered width is bounded by the page's content area.
-    doc.image(path.resolve(outDir, item.path), {
-      width: contentWidth,
-      align: 'center'
-    })
-    doc.moveDown(0.25)
+    const imagePath = path.resolve(outDir, item.path)
+    try {
+      // Only `width` is passed, so PDFKit scales the image's height
+      // proportionally - the crop's aspect ratio is preserved while its
+      // rendered width is bounded by the page's content area.
+      doc.image(imagePath, {
+        width: contentWidth,
+        align: 'center'
+      })
+      doc.moveDown(0.25)
+    } catch (err) {
+      // A bad crop must not abort the whole document - skip just this
+      // image and keep rendering the rest of the book.
+      console.error(
+        `[export-pdf] failed to draw image ${imagePath}: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      )
+    }
   }
 
   if (item.caption) {

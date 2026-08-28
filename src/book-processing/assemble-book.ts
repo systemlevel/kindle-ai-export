@@ -110,12 +110,13 @@ function deriveCounts(
 }
 
 /**
- * Mirrors the scheduler's own status derivation: an explicit cancellation
- * always wins, a fully-succeeded inventory is `complete`, any partial
- * success is `partial`, and zero successes is `failed`. This is computed
- * from the final assembled counts rather than passed through from
- * `runStatus`, so a whole-run failure that still produced some successful
- * pages is correctly reported as `partial`, not `failed`.
+ * A counts-based status derivation: an explicit cancellation always wins, a
+ * fully-succeeded inventory is `complete`, any partial success is
+ * `partial`, and zero successes is `failed`. This is computed from the
+ * final assembled counts rather than passed through from `runStatus`, so it
+ * can intentionally diverge from `ProcessingRunResult.status` - e.g. a
+ * whole-run `configuration` failure that still produced some successful
+ * pages yields `runStatus: 'failed'` but a document `status` of `'partial'`.
  */
 function deriveBookStatus(
   cancelled: boolean,

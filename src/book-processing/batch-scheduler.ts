@@ -128,6 +128,13 @@ export async function processPageSources(
   ).length
   const startedAt = now()
 
+  console.log('[scheduler] run start', {
+    runId: input.runId,
+    pages: expected,
+    batchSize: config.batchSize,
+    concurrency: config.concurrency
+  })
+
   const records = new Map<string, PageCheckpoint>()
   const activeBatchIds = new Set<string>()
   let batchCounter = 0
@@ -136,6 +143,15 @@ export async function processPageSources(
 
   const aborted = (): boolean => input.signal?.aborted ?? false
   const nextBatchId = (): string => `b${(batchCounter += 1)}`
+
+  /** Marks the run cancelled and logs it exactly once, no matter how many
+   * concurrent batches observe the abort signal. */
+  function markCancelled(): void {
+    if (!cancelled) {
+      console.warn('[scheduler] run cancelled', { runId: input.runId })
+    }
+    cancelled = true
+  }
 
   function currentCounts(): AggregateCounts {
     let succeeded = 0
@@ -251,6 +267,12 @@ export async function processPageSources(
 
       const delayMs =
         category === 'transient-service' ? transientDelayMs(attempt) : 0
+      console.warn('[scheduler] batch retry', {
+        batchId,
+        category,
+        attempt,
+        delayMs
+      })
       if (delayMs > 0) {
         if (aborted()) return { kind: 'cancelled' }
         await sleep(delayMs)
@@ -268,7 +290,13 @@ export async function processPageSources(
       const page = output.pages.find(
         (entry) => entry.pageId === source.captureId
       )
-      if (!page) continue
+      if (!page) {
+        console.warn('[scheduler] batch ok but page missing from output', {
+          batchId,
+          captureId: source.captureId
+        })
+        continue
+      }
       const document = await input.normalizePage({
         page,
         source,
@@ -312,25 +340,41 @@ export async function processPageSources(
     }
     await input.store.write(checkpoint)
     records.set(source.captureId, checkpoint)
+    console.warn('[scheduler] failed checkpoint written', {
+      captureId: source.captureId,
+      category: failure.category,
+      batchId
+    })
     await writeState('running', null)
   }
 
   async function processBatch(sources: AvailablePageSource[]): Promise<void> {
     if (terminalRunFailure || cancelled) return
     if (aborted()) {
-      cancelled = true
+      markCancelled()
       return
     }
 
     const batchId = nextBatchId()
+    const pageIds = sources.map((source) => source.captureId)
     activeBatchIds.add(batchId)
+    console.log('[scheduler] batch start', {
+      batchId,
+      pages: sources.length,
+      pageIds
+    })
     try {
       const outcome = await attemptBatch(sources, batchId)
       if (outcome.kind === 'cancelled') {
-        cancelled = true
+        markCancelled()
         return
       }
       if (outcome.kind === 'ok') {
+        console.log('[scheduler] batch success', {
+          batchId,
+          pages: sources.length,
+          attempts: outcome.attempts
+        })
         // A completed run is preserved even if cancellation arrived during it.
         await checkpointSuccesses(
           sources,
@@ -346,12 +390,19 @@ export async function processPageSources(
         failure.category === 'transient-service' ||
         failure.category === 'configuration'
       ) {
+        if (!terminalRunFailure) {
+          console.error(`[scheduler] run aborted (${failure.category})`, {
+            batchId,
+            code: failure.code,
+            attempts: failure.attempts
+          })
+        }
         terminalRunFailure = failure
         return
       }
 
       if (aborted()) {
-        cancelled = true
+        markCancelled()
         return
       }
       if (sources.length === 1) {
@@ -360,8 +411,16 @@ export async function processPageSources(
       }
 
       const midpoint = Math.ceil(sources.length / 2)
-      await processBatch(sources.slice(0, midpoint))
-      await processBatch(sources.slice(midpoint))
+      const left = sources.slice(0, midpoint)
+      const right = sources.slice(midpoint)
+      console.log('[scheduler] batch split', {
+        batchId,
+        parentPageIds: pageIds,
+        leftPageIds: left.map((source) => source.captureId),
+        rightPageIds: right.map((source) => source.captureId)
+      })
+      await processBatch(left)
+      await processBatch(right)
     } finally {
       activeBatchIds.delete(batchId)
     }
@@ -377,6 +436,10 @@ export async function processPageSources(
       const checkpoint = unavailableCheckpoint(source)
       await input.store.write(checkpoint)
       records.set(source.captureId, checkpoint)
+      console.warn('[scheduler] failed checkpoint written', {
+        captureId: source.captureId,
+        category: checkpoint.failure.category
+      })
       continue
     }
     const reusable = await input.store.readReusable(source, processor)
@@ -400,15 +463,29 @@ export async function processPageSources(
     scheduleError = err
   }
 
-  // 4. Assemble ordered records, counts, terminal status, and state.
-  const status = deriveStatus(cancelled, terminalRunFailure, currentCounts())
-  const runRecords = input.sources.map((source): BookPageRecord => {
-    const checkpoint = records.get(source.captureId)
-    if (checkpoint) return checkpoint
-    return { status: 'pending', source }
+  // 4. Assemble ordered records, counts, terminal status, and state. The
+  // terminal writeState runs in `finally` so persisted state is never left
+  // stuck on 'running', even if status derivation itself throws.
+  let status: BookStatus = 'failed'
+  let runRecords: BookPageRecord[] = []
+  let counts: AggregateCounts = currentCounts()
+  try {
+    status = deriveStatus(cancelled, terminalRunFailure, currentCounts())
+    runRecords = input.sources.map((source): BookPageRecord => {
+      const checkpoint = records.get(source.captureId)
+      if (checkpoint) return checkpoint
+      return { status: 'pending', source }
+    })
+    counts = currentCounts()
+  } finally {
+    await writeState(status, now())
+  }
+
+  console.log('[scheduler] run finish', {
+    runId: input.runId,
+    status,
+    counts
   })
-  const counts = currentCounts()
-  await writeState(status, now())
 
   if (scheduleError) throw scheduleError
 

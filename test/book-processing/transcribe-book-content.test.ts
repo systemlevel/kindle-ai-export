@@ -175,4 +175,31 @@ describe('processBook', () => {
 
     expect(openaiKeyAccessed).toBe(false)
   })
+
+  test('rejects and leaves no temp dir when Codex preflight fails', async () => {
+    await fs.chmod(fakeCodexPath, 0o700)
+    const { cwd } = await createBookFixture()
+
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      ASIN: 'TESTASIN',
+      CODEX_BIN: fakeCodexPath,
+      // `codex login status` exits non-zero, so preflight must fail before
+      // any batch, temp directory, or checkpoint is ever created.
+      FAKE_CODEX_SCENARIO: 'login-unauthenticated'
+    }
+
+    const tmpEntriesBefore = await fs.readdir(os.tmpdir())
+
+    await expect(processBook({ cwd, env })).rejects.toThrow(
+      /Codex preflight failed/
+    )
+
+    const tmpEntriesAfter = await fs.readdir(os.tmpdir())
+    const leftoverCodexTempDirs = tmpEntriesAfter.filter(
+      (entry) =>
+        entry.startsWith('kindle-codex-') && !tmpEntriesBefore.includes(entry)
+    )
+    expect(leftoverCodexTempDirs).toEqual([])
+  })
 })

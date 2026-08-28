@@ -346,6 +346,10 @@ describe('assembleBookDocument', () => {
       'cancelled',
       'cancelled'
     ])
+    // Cancelled records fold into the pending count by construction: only
+    // `succeeded`/`failed` checkpoints are counted separately, so the two
+    // unfinished (cancelled) sources here show up as `pending`.
+    expect(document.counts.pending).toBe(2)
   })
 
   test('synthesized pending and cancelled records carry the source but no content', () => {

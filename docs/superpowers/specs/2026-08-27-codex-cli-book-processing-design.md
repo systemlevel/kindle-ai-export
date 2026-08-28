@@ -95,7 +95,7 @@ Book directories containing extracted content use mode `0700`; newly created sen
 
 ### Capture source
 
-Every expected page has a `PageSource`:
+Every expected page begins with a shared source reference:
 
 | Field | Meaning |
 |---|---|
@@ -104,11 +104,14 @@ Every expected page has a `PageSource`:
 | `printedPage` | Kindle printed page when available, otherwise `null` |
 | `position` | `{start, end}` Kindle positions when available, otherwise `null` |
 | `screenshotPath` | Book-relative canonical PNG path |
-| `screenshotSha256` | Lowercase SHA-256 of PNG bytes |
-| `width`, `height` | PNG pixel dimensions |
 | `rendererBatch` | Renderer TAR identity when known, otherwise `null` |
 
-The capture ID is stable within a captured edition/layout. Screenshot hash and processor configuration determine cache validity.
+`PageSource` is a discriminated union:
+
+- `availability: "available"` adds lowercase screenshot SHA-256 plus nonzero pixel width and height. Only available sources may be sent to Codex, normalized, cropped, or cached.
+- `availability: "unavailable"` sets screenshot SHA-256, width, and height to `null` and contains a typed `source` failure explaining why the expected path could not be read or decoded.
+
+The capture ID is stable within a captured edition/layout. For available sources, screenshot hash and processor configuration determine cache validity. Unavailable sources become failed page records and are never cache hits.
 
 ### Raw Codex output
 
@@ -145,7 +148,7 @@ Each persisted `page-documents/<capture-id>.json` checkpoint is a discriminated 
 
 The assembled book uses a broader `BookPageRecord` union. In addition to those persisted states, it may synthesize `status: "pending"` for a page that has no checkpoint or `status: "cancelled"` for an uncheckpointed page when the operator cancels the run. Pending and cancelled records contain their `PageSource` and no invented content.
 
-Processing provenance contains:
+Successful checkpoints and non-source failures contain an available source. A source-failure checkpoint may contain an unavailable source. Processing provenance contains:
 
 - Runner kind `codex-cli`.
 - Codex CLI version.
@@ -198,7 +201,7 @@ Citation stability is defined for an unchanged source screenshot and processor c
 - Expected, captured, succeeded, failed, and pending counts.
 - Every expected page record in capture order, including failures.
 
-The assembler never filters out failed pages.
+`expected` counts the complete metadata inventory, while `captured` counts sources whose screenshot evidence is available. The assembler never filters out unavailable or failed pages.
 
 ### Legacy projection
 

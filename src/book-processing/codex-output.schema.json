@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "pages"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "1" },
+    "pages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pageId", "blocks", "warnings"],
+        "properties": {
+          "pageId": { "type": "string" },
+          "blocks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "order",
+                "kind",
+                "runs",
+                "alignment",
+                "indentLevel",
+                "headingLevel",
+                "region",
+                "regionConfidence",
+                "mediaDescription",
+                "caption"
+              ],
+              "properties": {
+                "order": { "type": "integer", "minimum": 0 },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "heading",
+                    "paragraph",
+                    "list-item",
+                    "quote",
+                    "caption",
+                    "image",
+                    "table",
+                    "footnote",
+                    "page-number",
+                    "other"
+                  ]
+                },
+                "runs": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["text", "styles"],
+                    "properties": {
+                      "text": { "type": "string" },
+                      "styles": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": ["bold", "italic", "small-caps", "unknown"]
+                        }
+                      }
+                    }
+                  }
+                },
+                "alignment": {
+                  "type": "string",
+                  "enum": ["left", "center", "right", "justified", "unknown"]
+                },
+                "indentLevel": { "type": "integer", "minimum": 0 },
+                "headingLevel": {
+                  "type": ["integer", "null"],
+                  "minimum": 1,
+                  "maximum": 6
+                },
+                "region": {
+                  "type": ["object", "null"],
+                  "additionalProperties": false,
+                  "required": ["x", "y", "width", "height"],
+                  "properties": {
+                    "x": { "type": "integer", "minimum": 0, "maximum": 1000 },
+                    "y": { "type": "integer", "minimum": 0, "maximum": 1000 },
+                    "width": { "type": "integer", "minimum": 0, "maximum": 1000 },
+                    "height": { "type": "integer", "minimum": 0, "maximum": 1000 }
+                  }
+                },
+                "regionConfidence": {
+                  "type": "string",
+                  "enum": ["high", "medium", "low", "unknown"]
+                },
+                "mediaDescription": { "type": ["string", "null"] },
+                "caption": { "type": ["string", "null"] }
+              }
+            }
+          },
+          "warnings": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}

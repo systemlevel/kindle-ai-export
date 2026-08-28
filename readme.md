@@ -28,13 +28,13 @@
 
 ## Intro
 
-This project makes it easy to export the contents of any ebook in your Kindle library as text, PDF, EPUB, or as a custom, AI-narrated audiobook. It only requires a valid Amazon Kindle account and an OpenAI API key.
+This project makes it easy to export the contents of any ebook in your Kindle library as text, PDF, EPUB, or as a custom, AI-narrated audiobook. It only requires a valid Amazon Kindle account and a locally installed, authenticated [Codex CLI](https://github.com/openai/codex). An OpenAI API key is only needed if you want to generate an AI-narrated audiobook using OpenAI's TTS.
 
 _You must own the ebook on Kindle for this project to work._
 
 ### How does it work?
 
-It works by logging into your [Kindle web reader](https://read.amazon.com) account using [Playwright](https://playwright.dev), exporting each page of a book as a PNG image, and then using a vLLM (defaulting to `gpt-4.1-mini`) to transcribe the text from each page to text. Once we have the raw book contents and metadata, then it's easy to convert it to PDF, EPUB, etc. 🔥
+It works by logging into your [Kindle web reader](https://read.amazon.com) account using [Playwright](https://playwright.dev), exporting each page of a book as a PNG image, and then using the locally installed [Codex CLI](https://github.com/openai/codex) (`codex exec`) to transcribe each page's text and layout. Once we have the raw book contents and metadata, then it's easy to convert it to PDF, EPUB, etc. 🔥
 
 This [example](./examples/B0819W19WD) uses the first page of the scifi book [Revelation Space](https://www.amazon.com/gp/product/B0819W19WD?ref_=dbs_m_mng_rwt_calw_tkin_0&storeType=ebooks) by [Alastair Reynolds](https://www.goodreads.com/author/show/51204.Alastair_Reynolds):
 
@@ -66,7 +66,7 @@ This [example](./examples/B0819W19WD) uses the first page of the scifi book [Rev
     </tr>
     <tr>
       <td>
-        We then convert each page's screenshot into text using one of OpenAI's vLLMs (<strong>gpt-4.1-mini</strong>.
+        We then convert each page's screenshot into text using the locally installed <strong>Codex CLI</strong>.
       </td>
       <td>
         <p>Mantell Sector, North Nekhebet, Resurgam, Delta Pavonis system, 2551</p>
@@ -161,17 +161,27 @@ Make sure you have `node >= 18` and [pnpm](https://pnpm.io) installed.
 
 ### Setup Env Vars
 
-Set up these required environment variables in a local `.env`:
+Set up these environment variables in a local `.env` (see [`.env.example`](./.env.example)):
 
 ```sh
 AMAZON_EMAIL=
 AMAZON_PASSWORD=
 ASIN=
 
+# Optional Codex processing overrides
+CODEX_MODEL=
+CODEX_BATCH_SIZE=8
+CODEX_CONCURRENCY=1
+CODEX_TIMEOUT_MS=300000
+ALLOW_PARTIAL=false
+
+# Optional, only required when TTS_ENGINE=openai
 OPENAI_API_KEY=
 ```
 
 You can find your book's [ASIN](https://en.wikipedia.org/wiki/Amazon_Standard_Identification_Number) (Amazon ID) by visiting [read.amazon.com](https://read.amazon.com) and clicking on the book you want to export. The resulting URL will look like `https://read.amazon.com/?asin=B0819W19WD&ref_=kwl_kr_iv_rec_2`, with `B0819W19WD` being the ASIN in this case.
+
+`OPENAI_API_KEY` is **not** used for page transcription — it's only read by the optional audiobook exporter when `TTS_ENGINE=openai`. Transcription instead uses the local [Codex CLI](https://github.com/openai/codex), which must be installed and authenticated separately (see [Transcribe Book Content](#transcribe-book-content) below).
 
 ### Extract Kindle Book
 
@@ -201,11 +211,16 @@ npx tsx src/extract-kindle-book.ts
 npx tsx src/transcribe-book-content.ts
 ```
 
-- _(This takes a few minutes to run)_
-- This takes each of the page screenshots and runs them through a vLLM (defaulting to `gpt-4.1-mini`) to extract the raw text content from each page of the book.
-- It then stitches these text chunks together, taking into account chapter boundaries.
-- The result is stored as JSON to `out/${asin}/content.json`.
+- _(This takes a few minutes to run, depending on book length)_
+- **Requires the [Codex CLI](https://github.com/openai/codex) to be installed and authenticated on your machine.** Check with `codex login status`, and if it's not authenticated, run `codex login`. `OPENAI_API_KEY` is **not** used for this step — Codex is invoked locally but talks to the authenticated Codex service (not offline/local inference) unless you've separately configured Codex to use an OSS provider.
+- This takes each page screenshot and sends it, in ordered batches, to `codex exec` to extract structured content: headings, paragraphs, lists, quotes, captions, embedded images, and page numbers, each tagged with alignment/emphasis and a stable citation back to its source page.
+- Pages are processed in batches (`CODEX_BATCH_SIZE`, default `8`) with checkpoints written per page as they succeed, so if the run is interrupted or a page fails, rerunning the command resumes from where it left off instead of reprocessing pages that already succeeded.
+- The canonical result is stored as JSON to `out/${asin}/book-document.json`. A backward-compatible plain-text projection is also written to `out/${asin}/content.json` for the existing Markdown/PDF/EPUB/audio exporters.
+- Full page screenshots and any extracted media crops remain on disk under `out/${asin}/` as the canonical source evidence — nothing is discarded.
+- If a run finishes without every page succeeding, the resulting document is `partial`. Partial documents are **not** exported (to `content.json` or otherwise) unless you set `ALLOW_PARTIAL=true`.
 - Example: [examples/B0819W19WD/content.json](./examples/B0819W19WD/content.json)
+
+Useful overrides (see [`.env.example`](./.env.example)): `CODEX_MODEL` (Codex's default if unset), `CODEX_BATCH_SIZE`, `CODEX_CONCURRENCY`, `CODEX_TIMEOUT_MS`, and `ALLOW_PARTIAL`.
 
 ### (Optional) Export Book as PDF
 
@@ -282,15 +297,15 @@ If you want to explore other ways of exporting your personal ebooks from Kindle,
 
 Compared with these approaches, the approach used by this project is much easier to automate. It also retains metadata about Kindle's original sync positions which is very useful for cases where you'd like to interoperate with Kindle. E.g., be able to jump from reading a Kindle book to listening to an AI-generated narration on a walk and then jumping back to reading the Kindle book and having the sync positions "just work".
 
-The main downside is that it's possible for some transcription errors to occur during the `image ⇒ text` step - which uses a multimodal LLM and is not 100% deterministic. In my testing, I've been remarkably surprised with how accurate the results are, but there are occasional issues mostly with differentiating whitespace between paragraphs versus soft section breaks. Note that both Calibre and Epubor also use heuristics to deal with things like spacing and dashes used by wordwrap, so the fidelity of the conversions will not be 100% one-to-one with the original Kindle version in any case.
+The main downside is that it's possible for some transcription errors to occur during the `image ⇒ text` step - which uses a multimodal LLM (the local Codex CLI) and is not 100% deterministic. In my testing, I've been remarkably surprised with how accurate the results are, but there are occasional issues mostly with differentiating whitespace between paragraphs versus soft section breaks. Note that both Calibre and Epubor also use heuristics to deal with things like spacing and dashes used by wordwrap, so the fidelity of the conversions will not be 100% one-to-one with the original Kindle version in any case.
 
-The other downside is that the **LLM costs add up to a dollars per book using `gpt-4.1-mini`**. With LLM costs constantly decreasing and local vLLMs, this cost per book should be free or almost free soon. The screenshots are also really good quality with no extra content, so you could swap any other OCR solution for the vLLM-based `image ⇒ text` quite easily.
+Because transcription runs through your own local, authenticated Codex CLI rather than metered OpenAI API calls, there's no separate per-book API bill for this step (usage is governed by whatever Codex/ChatGPT plan you're authenticated with). The screenshots are also really good quality with no extra content, so you could swap any other OCR/vLLM-based solution for the Codex-based `image ⇒ text` step fairly easily.
 
 ### How is the accuracy?
 
 The accuracy / fidelity has been very close to perfect in my testing, with the only discrepancies being occasional whitespace issues.
 
-I'm sure there will be edge cases and ebook features that are missing (like embedded images), but it shouldn't be too hard to add those if there's enough interest.
+I'm sure there will be edge cases and ebook features that aren't handled perfectly, but it shouldn't be too hard to improve those if there's enough interest.
 
 ## License
 

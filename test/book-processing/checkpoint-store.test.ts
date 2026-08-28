@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import type {
   AvailablePageSource,
@@ -140,6 +140,84 @@ describe('createCheckpointStore', () => {
     expect(await store.readReusable(source, changedProcessor)).toBeUndefined()
     await store.write(failedCheckpoint)
     expect(await store.readReusable(source, processor)).toBeUndefined()
+  })
+
+  test('readReusable stays silent on a genuine cache miss', async () => {
+    const outDir = await createOutDir()
+    const store = await createCheckpointStore(outDir)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(await store.readReusable(source, processor)).toBeUndefined()
+      expect(warnSpy).not.toHaveBeenCalled()
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  test('readReusable treats a corrupt checkpoint as a cache miss and warns, while read() still throws', async () => {
+    const outDir = await createOutDir()
+    const store = await createCheckpointStore(outDir)
+    await fs.writeFile(
+      path.join(outDir, 'page-documents', 'c000000.json'),
+      `${JSON.stringify({ ...successCheckpoint, status: 'unknown' })}\n`,
+      { mode: 0o600 }
+    )
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(await store.readReusable(source, processor)).toBeUndefined()
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      expect(warnSpy.mock.calls[0]?.[0]).toContain('c000000')
+    } finally {
+      warnSpy.mockRestore()
+    }
+
+    await expect(store.read('c000000')).rejects.toThrow()
+  })
+
+  test('readReusable treats invalid JSON as a cache miss and warns, while read() still throws', async () => {
+    const outDir = await createOutDir()
+    const store = await createCheckpointStore(outDir)
+    await fs.writeFile(
+      path.join(outDir, 'page-documents', 'c000000.json'),
+      'not json',
+      { mode: 0o600 }
+    )
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(await store.readReusable(source, processor)).toBeUndefined()
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      expect(warnSpy.mock.calls[0]?.[0]).toContain('c000000')
+    } finally {
+      warnSpy.mockRestore()
+    }
+
+    await expect(store.read('c000000')).rejects.toThrow()
+  })
+
+  test('readReusable treats a missing warnings array as a corrupt succeeded checkpoint', async () => {
+    const outDir = await createOutDir()
+    const store = await createCheckpointStore(outDir)
+    const { warnings, ...documentWithoutWarnings } = successCheckpoint.document
+    await fs.writeFile(
+      path.join(outDir, 'page-documents', 'c000000.json'),
+      `${JSON.stringify({
+        ...successCheckpoint,
+        document: documentWithoutWarnings
+      })}\n`,
+      { mode: 0o600 }
+    )
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(await store.readReusable(source, processor)).toBeUndefined()
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+    } finally {
+      warnSpy.mockRestore()
+    }
+
+    await expect(store.read('c000000')).rejects.toThrow()
   })
 
   test('writes private files atomically', async () => {

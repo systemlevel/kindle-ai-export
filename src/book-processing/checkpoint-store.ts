@@ -24,7 +24,9 @@ export interface CheckpointStore {
   /** Returns the stored checkpoint only when it succeeded and its recorded
    * page cache key exactly matches the key recomputed for `source` and
    * `processor` right now; otherwise returns `undefined` so the caller
-   * reprocesses the page. */
+   * reprocesses the page. A corrupt checkpoint file is treated the same as
+   * a cache miss (logging a warning) rather than throwing, so one bad
+   * checkpoint cannot abort an otherwise-resumable run. */
   readReusable(
     source: AvailablePageSource,
     processor: ProcessorIdentity
@@ -102,7 +104,17 @@ export async function createCheckpointStore(
     source: AvailablePageSource,
     processor: ProcessorIdentity
   ): Promise<SucceededPageCheckpoint | undefined> {
-    const checkpoint = await read(source.captureId)
+    let checkpoint: PageCheckpoint | undefined
+    try {
+      checkpoint = await read(source.captureId)
+    } catch (err) {
+      console.warn(
+        `Ignoring corrupt checkpoint for ${source.captureId}, reprocessing: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      )
+      return undefined
+    }
     if (!checkpoint || checkpoint.status !== 'succeeded') return undefined
 
     const expectedCacheKey = createPageCacheKey(source, processor)
@@ -193,7 +205,11 @@ function validateCheckpoint(value: unknown, captureId: string): PageCheckpoint {
         `Checkpoint ${captureId} is marked succeeded without an available source`
       )
     }
-    if (!isRecord(value.document) || !Array.isArray(value.document.blocks)) {
+    if (
+      !isRecord(value.document) ||
+      !Array.isArray(value.document.blocks) ||
+      !Array.isArray(value.document.warnings)
+    ) {
       throw new Error(`Checkpoint ${captureId} is missing a valid document`)
     }
     return value as unknown as SucceededPageCheckpoint

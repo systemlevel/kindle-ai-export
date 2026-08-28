@@ -138,10 +138,12 @@ Text-run emphasis is limited to `bold`, `italic`, `small-caps`, and `unknown`. T
 
 ### Normalized page record
 
-Each `page-documents/<capture-id>.json` is a discriminated record with shared source and processing data plus one of two states:
+Each persisted `page-documents/<capture-id>.json` checkpoint is a discriminated record with shared source and processing data plus one of two states:
 
 - `status: "succeeded"` contains a normalized page document.
 - `status: "failed"` contains a typed failure record.
+
+The assembled book uses a broader `BookPageRecord` union. In addition to those persisted states, it may synthesize `status: "pending"` for a page that has no checkpoint or `status: "cancelled"` for an uncheckpointed page when the operator cancels the run. Pending and cancelled records contain their `PageSource` and no invented content.
 
 Processing provenance contains:
 
@@ -307,9 +309,9 @@ On `SIGINT` or `SIGTERM`, the scheduler stops launching batches, sends `SIGTERM`
 ### Completeness and export
 
 - All expected pages succeeded: `complete`.
-- At least one succeeded and one failed: `partial`.
-- Expected pages exist but none succeeded: `failed`.
-- Operator cancellation: `cancelled`.
+- The run ended without cancellation, at least one page succeeded, and at least one page is failed or pending: `partial`.
+- The run ended unsuccessfully without cancellation and no page succeeded: `failed`.
+- Operator cancellation, regardless of completed-page count: `cancelled`.
 
 Markdown and PDF exporters reject any status other than `complete` unless partial output is explicitly enabled. Partial exports insert a visible marker containing the page/capture locator but no invented text.
 

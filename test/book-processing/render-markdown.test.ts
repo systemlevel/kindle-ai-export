@@ -124,6 +124,31 @@ function bookDocumentFor(
   }
 }
 
+/** Builds a minimal single-run paragraph block for chapter-boundary tests
+ * that only care about which pages' text ends up under which heading. */
+function paragraphBlockFor(
+  citationId: string,
+  source: AvailablePageSource,
+  text: string
+): NormalizedBlock {
+  return {
+    order: 0,
+    kind: 'paragraph',
+    runs: [{ text, styles: [] }],
+    alignment: 'left',
+    indentLevel: 0,
+    headingLevel: null,
+    region: null,
+    regionConfidence: 'unknown',
+    mediaDescription: null,
+    caption: null,
+    blockId: 'b0000',
+    text,
+    citation: citationFor(citationId, source, 0, 'paragraph'),
+    mediaAsset: null
+  }
+}
+
 /**
  * Two TOC entries where only the second lacks a `page` (it is keyed by
  * `location` instead, as Kindle back-matter bookmarks often are). This
@@ -399,6 +424,40 @@ describe('renderBookMarkdown', () => {
     )
   })
 
+  test('renders only the source-page link when no crop, description, or caption exists, without inventing an "Image" placeholder', () => {
+    const source = sourceFor('c000014', 9)
+    const block: NormalizedBlock = {
+      order: 0,
+      kind: 'image',
+      runs: [],
+      alignment: 'left',
+      indentLevel: 0,
+      headingLevel: null,
+      region: null,
+      regionConfidence: 'unknown',
+      mediaDescription: null,
+      caption: null,
+      blockId: 'b0000',
+      text: '',
+      citation: citationFor('citation-c000014-0', source, 0, 'image'),
+      mediaAsset: null
+    }
+    const page = succeededPageFor(source, [block])
+    const document = bookDocumentFor([page], 'complete')
+
+    const markdown = renderBookMarkdown({
+      document,
+      metadata,
+      allowPartial: false
+    })
+
+    expect(markdown).toContain(
+      '[View source page](pages/c000014.png)\n<!-- kindle-citation: citation-c000014-0 -->'
+    )
+    expect(markdown).not.toMatch(/Image \[View source page\]/)
+    expect(markdown).not.toContain('Image')
+  })
+
   test('escapes markdown metacharacters in run text and image alt text', () => {
     const source = sourceFor('c000012', 7)
     const textBlock: NormalizedBlock = {
@@ -611,5 +670,129 @@ describe('renderBookMarkdown', () => {
     expect(() =>
       renderBookMarkdown({ document, metadata, allowPartial: false })
     ).not.toThrow()
+  })
+
+  test('inserts a caller-supplied Table of Contents section between the byline and the chapters', () => {
+    const source = sourceFor('c000040', 1)
+    const page = succeededPageFor(source, [
+      paragraphBlockFor('citation-c000040-0', source, 'Body text.')
+    ])
+    const document = bookDocumentFor([page], 'complete')
+
+    const tocMarkdown = '## Table of Contents\n\n- [Chapter One](#chapter-one)'
+
+    const markdown = renderBookMarkdown({
+      document,
+      metadata,
+      allowPartial: false,
+      tocMarkdown
+    })
+
+    expect(markdown).toBe(
+      [
+        '# Synthetic Book',
+        '',
+        '> By Test Author',
+        '',
+        '---',
+        '',
+        '## Table of Contents',
+        '',
+        '- [Chapter One](#chapter-one)',
+        '',
+        '---',
+        '',
+        '## Chapter One',
+        '',
+        'Body text\\.',
+        '<!-- kindle-citation: citation-c000040-0 -->'
+      ].join('\n')
+    )
+  })
+
+  test('omitting tocMarkdown renders no Table of Contents section (default behavior)', () => {
+    const source = sourceFor('c000041', 1)
+    const page = succeededPageFor(source, [
+      paragraphBlockFor('citation-c000041-0', source, 'Body text.')
+    ])
+    const document = bookDocumentFor([page], 'complete')
+
+    const markdown = renderBookMarkdown({
+      document,
+      metadata,
+      allowPartial: false
+    })
+
+    expect(markdown).not.toContain('Table of Contents')
+    expect(markdown).not.toContain('---')
+  })
+
+  test('extends a chapter whose next-boundary page is never reached to the end of the book, instead of dropping it', () => {
+    // Four TOC entries: three real chapters plus a location-only sentinel
+    // last entry (never itself rendered - see the shared fixture's comment
+    // above). "Chapter Two"'s own next boundary (page 100) is never reached
+    // by any page's printed page number, so under the ported legacy loop it
+    // would have been silently dropped; the current behavior instead extends
+    // "Chapter Two" all the way to the end of the book, absorbing what would
+    // have been "Chapter Three"'s content, and "Chapter Three" renders as an
+    // empty heading.
+    const multiChapterToc: BookMetadata['toc'] = [
+      { label: 'Chapter One', positionId: 0, page: 1, depth: 0 },
+      { label: 'Chapter Two', positionId: 1, page: 2, depth: 0 },
+      { label: 'Chapter Three', positionId: 2, page: 100, depth: 0 },
+      { label: 'Back Matter', positionId: 3, location: 9999, depth: 0 }
+    ]
+    const multiChapterMetadata: BookMetadata = {
+      ...metadata,
+      toc: multiChapterToc
+    }
+
+    const source1 = sourceFor('c000050', 1)
+    const source2 = sourceFor('c000051', 2)
+    const source3 = sourceFor('c000052', 3)
+
+    const page1 = succeededPageFor(source1, [
+      paragraphBlockFor('citation-c000050-0', source1, 'Chapter one body.')
+    ])
+    const page2 = succeededPageFor(source2, [
+      paragraphBlockFor('citation-c000051-0', source2, 'Chapter two body.')
+    ])
+    const page3 = succeededPageFor(source3, [
+      paragraphBlockFor(
+        'citation-c000052-0',
+        source3,
+        'Chapter three body, absorbed by chapter two.'
+      )
+    ])
+    const document = bookDocumentFor([page1, page2, page3], 'complete')
+
+    const markdown = renderBookMarkdown({
+      document,
+      metadata: multiChapterMetadata,
+      allowPartial: false
+    })
+
+    const chapterOneIndex = markdown.indexOf('## Chapter One')
+    const chapterTwoIndex = markdown.indexOf('## Chapter Two')
+    const chapterThreeIndex = markdown.indexOf('## Chapter Three')
+
+    expect(chapterOneIndex).toBeGreaterThan(-1)
+    expect(chapterTwoIndex).toBeGreaterThan(chapterOneIndex)
+    expect(chapterThreeIndex).toBeGreaterThan(chapterTwoIndex)
+
+    expect(markdown.slice(chapterOneIndex, chapterTwoIndex)).toContain(
+      'Chapter one body\\.'
+    )
+
+    const chapterTwoSection = markdown.slice(chapterTwoIndex, chapterThreeIndex)
+    expect(chapterTwoSection).toContain('Chapter two body\\.')
+    expect(chapterTwoSection).toContain(
+      'Chapter three body, absorbed by chapter two\\.'
+    )
+
+    // "Chapter Three" itself renders as a heading with no body content or
+    // citations, since chapter Two's extension already consumed every page.
+    const chapterThreeSection = markdown.slice(chapterThreeIndex)
+    expect(chapterThreeSection).not.toContain('kindle-citation')
   })
 })

@@ -11,6 +11,14 @@ export interface RenderBookMarkdownInput {
   document: BookDocument
   metadata: BookMetadata
   allowPartial: boolean
+  /**
+   * Optional pre-rendered Table of Contents section (its `## Table of
+   * Contents` heading plus an anchor-linked bullet list), inserted between
+   * the byline and the chapter body with the same `---` separators the
+   * legacy exporter used. Omitted/empty by default, which renders exactly
+   * as before - the shape the pinned snapshot tests below exercise.
+   */
+  tocMarkdown?: string
 }
 
 /** Markdown metacharacters that must be escaped in plain text and image alt
@@ -53,11 +61,13 @@ function renderBlockBody(block: NormalizedBlock): string | null {
 
     // No crop asset exists (ineligible region, or the crop failed): fall
     // back to the model's media description plus a link to the full page
-    // screenshot, so a reader can always find the original evidence.
-    const description = escapeMarkdown(
-      block.mediaDescription ?? block.caption ?? 'Image'
-    )
-    return `${description} [View source page](${block.citation.screenshotPath})`
+    // screenshot, so a reader can always find the original evidence. When
+    // neither a media description nor a caption is available, emit just the
+    // link - inventing a placeholder like "Image" would misrepresent what
+    // the model actually reported.
+    const description = block.mediaDescription ?? block.caption
+    const link = `[View source page](${block.citation.screenshotPath})`
+    return description ? `${escapeMarkdown(description)} ${link}` : link
   }
 
   return renderRuns(block.runs)
@@ -157,17 +167,25 @@ function renderChapters(
  * replaced with invented text.
  */
 export function renderBookMarkdown(input: RenderBookMarkdownInput): string {
-  const { document, metadata, allowPartial } = input
+  const { document, metadata, allowPartial, tocMarkdown } = input
 
   if (document.status !== 'complete' && !allowPartial) {
     throw new Error(partialLegacyContentRejectionMessage)
   }
 
+  // The brief only requires escaping plain text and image alt text; escaping
+  // the title/byline too is a deliberate superset, applied here so every
+  // piece of OCR'd metadata gets the same Markdown-safety guarantee.
   const sections: string[] = [
     `# ${escapeMarkdown(metadata.meta.title)}`,
-    `> By ${metadata.meta.authorList.map((author) => escapeMarkdown(author)).join(', ')}`,
-    ...renderChapters(document.pages, metadata.toc, allowPartial)
+    `> By ${metadata.meta.authorList.map((author) => escapeMarkdown(author)).join(', ')}`
   ]
+
+  if (tocMarkdown) {
+    sections.push('---', tocMarkdown, '---')
+  }
+
+  sections.push(...renderChapters(document.pages, metadata.toc, allowPartial))
 
   return sections.join('\n\n')
 }

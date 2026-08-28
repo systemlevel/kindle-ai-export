@@ -56,8 +56,21 @@ const ocrPrompt =
   'You are analyzing a single scanned page image from a book. Return a JSON ' +
   'object that exactly matches the provided output schema, with two fields:\n' +
   '- "text": every word of readable text on the page, transcribed verbatim in ' +
-  'natural reading order, with paragraph breaks preserved. No commentary, ' +
-  'headers, or markup — just the text.\n' +
+  'natural reading order, formatted as GitHub-flavored Markdown that PRESERVES ' +
+  "the page's visual text hierarchy. Specifically:\n" +
+  '    * Text rendered visibly LARGER or BOLDER than the surrounding body text ' +
+  'becomes a Markdown heading, with the heading LEVEL scaled to its relative ' +
+  'prominence: the single most prominent title on the page -> "# ", a major ' +
+  'section header -> "## ", a smaller sub-header -> "### ", and so on for less ' +
+  'prominent headers.\n' +
+  '    * Inline runs that are bold or emphasized within body text -> ' +
+  '"**bold**" / "*italic*".\n' +
+  '    * Normal body prose stays as plain paragraphs, in reading order, with ' +
+  'paragraph breaks preserved.\n' +
+  '    * Base heading levels ONLY on the relative size/weight actually visible ' +
+  'in the page image; do NOT invent hierarchy that is not there. Keep the ' +
+  'transcription verbatim (the same words) — only add the Markdown structure. ' +
+  'No commentary of your own.\n' +
   '- "visuals": an array with one entry for EVERY figure, chart, graph, ' +
   'diagram, mathematical formula or equation, table, or image on the page. Do ' +
   'not miss any visual element. For each entry provide:\n' +

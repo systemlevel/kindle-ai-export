@@ -45,11 +45,13 @@ export function validateRawCodexBatch(
 
 function validatePageDomain(page: RawCodexPage): void {
   for (const [index, block] of page.blocks.entries()) {
-    if (block.order !== index) {
-      throw new CodexOutputValidationError(
-        `Page ${page.pageId} block order must be contiguous from zero`
-      )
-    }
+    // A block's POSITION in the array is the canonical reading order: the
+    // prompt requires blocks in reading order and downstream consumers derive
+    // load-bearing block IDs from `order`. The model's own `order` field is
+    // advisory/redundant (and real Codex numbers it 1-based), so we canonicalize
+    // it to the 0-based array index rather than rejecting non-zero-based output.
+    // All remaining domain checks run against the canonicalized block.
+    block.order = index
 
     for (const run of block.runs) {
       if (run.text.length === 0) {

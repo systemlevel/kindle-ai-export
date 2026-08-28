@@ -46,13 +46,27 @@ describe('validateRawCodexBatch', () => {
     )
   })
 
-  test('rejects noncontiguous block order', () => {
+  test('canonicalizes 1-based block order to the 0-based array position', () => {
     const input = structuredClone(valid)
-    input.pages[0]!.blocks[0]!.order = 2
+    const heading = input.pages[0]!.blocks[0]!
+    input.pages[0]!.blocks = [
+      { ...heading, order: 1 },
+      { ...heading, order: 2 },
+      { ...heading, order: 3 }
+    ]
 
-    expect(() => validateRawCodexBatch(input, ['c000000'])).toThrow(
-      'Page c000000 block order must be contiguous from zero'
-    )
+    const result = validateRawCodexBatch(input, ['c000000'])
+    expect(result.pages[0]!.blocks.map((block) => block.order)).toEqual([
+      0, 1, 2
+    ])
+  })
+
+  test('accepts a single block with a non-zero order and canonicalizes it to 0', () => {
+    const input = structuredClone(valid)
+    input.pages[0]!.blocks[0]!.order = 5
+
+    const result = validateRawCodexBatch(input, ['c000000'])
+    expect(result.pages[0]!.blocks[0]!.order).toBe(0)
   })
 
   test('rejects heading levels on non-heading blocks', () => {

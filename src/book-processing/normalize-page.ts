@@ -23,8 +23,9 @@ export interface NormalizePageInput {
  * Turns a validated, untrusted `RawCodexPage` model observation into a
  * `NormalizedPageDocument`: deterministic block IDs, concatenated block
  * text, locally-derived citations, and validated media crops. Block order
- * is already validated as contiguous-from-zero upstream and is preserved
- * exactly as received; this function never sorts or reorders blocks.
+ * is already canonicalized to contiguous-from-zero (the array position)
+ * upstream and is preserved exactly as received; this function never sorts
+ * or reorders blocks.
  */
 export async function normalizePage(
   input: NormalizePageInput

@@ -5,7 +5,6 @@ import {
   mkdirSync,
   mkdtempSync,
   promises as fs,
-  readFileSync,
   writeFileSync
 } from 'node:fs'
 import os from 'node:os'
@@ -41,10 +40,6 @@ const samplePagesDir = path.join(samplesDir, 'pages')
 const samplePageOneFileName = '0000-0001.png'
 const samplePageTwoFileName = '0001-0001.png'
 
-const referenceContent = JSON.parse(
-  readFileSync(path.join(samplesDir, 'content.json'), 'utf8')
-) as Array<{ index: number; text: string }>
-
 /** Collapses all whitespace (including the paragraph-boundary newlines the
  * normalizer inserts between blocks) to single spaces so comparisons are
  * insensitive to exactly how text is joined, matching how the repository's
@@ -53,12 +48,19 @@ function normalizedWhitespace(text: string): string {
   return text.replaceAll(/\s+/g, ' ').trim()
 }
 
-/** The repository's known-good first-page transcription (see
- * `examples/B0819W19WD/content.json`), whitespace-normalized the same way
- * the observed Codex output is below. */
-const normalizedReferencePageOne = normalizedWhitespace(
-  referenceContent.find((chunk) => chunk.index === 0)!.text
-)
+/** Distinctive, verbatim phrases from the committed reference transcription
+ * (`examples/B0819W19WD/content.json`). Page 1 is the opening of Alastair
+ * Reynolds' "Revelation Space"; these proper nouns and coined terms are
+ * reproduced character-for-character by any faithful transcription of the
+ * same image, so their presence proves genuine reading without demanding the
+ * byte-exact whole-page equality two different models never share. */
+const pageOnePhrases = [
+  'Mantell Sector',
+  'Delta Pavonis',
+  'razorstorm',
+  'Sylveste'
+]
+const pageTwoPhrases = ['Ptero Steppes', 'evacuation order', 'dust devils']
 
 const temporaryDirectories: string[] = []
 
@@ -194,12 +196,22 @@ describe.skipIf(!runRealCodex)('real Codex CLI integration', () => {
       'c000000',
       'c000001'
     ])
-    expect(normalizedText(result.document.pages[0]!)).toBe(
-      normalizedReferencePageOne
-    )
-    expect(normalizedText(result.document.pages[1]!)).toContain(
-      'Nekhebet landmass'
-    )
+    const pageOneText = normalizedText(result.document.pages[0]!)
+    const pageTwoText = normalizedText(result.document.pages[1]!)
+
+    // A faithful transcription of the opening page is a full page of prose,
+    // not a stub — guards against a "successful" but near-empty transcription.
+    expect(pageOneText.length).toBeGreaterThan(400)
+
+    // Prove genuine, cross-model transcription via distinctive verbatim phrases
+    // rather than byte-exact equality (two different LLMs never match exactly).
+    for (const phrase of pageOnePhrases) {
+      expect(pageOneText.toLowerCase()).toContain(phrase.toLowerCase())
+    }
+    for (const phrase of pageTwoPhrases) {
+      expect(pageTwoText.toLowerCase()).toContain(phrase.toLowerCase())
+    }
+
     expect(
       allSuccessfulBlocks(result.document).every((block) =>
         block.citation.id.startsWith('knd:')

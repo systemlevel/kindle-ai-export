@@ -12,6 +12,12 @@ export interface ProcessorIdentityInput {
   normalizerVersion: string
 }
 
+function compareCodeUnits(left: string, right: string): number {
+  if (left < right) return -1
+  if (left > right) return 1
+  return 0
+}
+
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map(canonicalize)
@@ -20,7 +26,7 @@ function canonicalize(value: unknown): unknown {
   if (value && typeof value === 'object') {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
-        .toSorted(([left], [right]) => left.localeCompare(right))
+        .toSorted(([left], [right]) => compareCodeUnits(left, right))
         .map(([key, entry]) => [key, canonicalize(entry)])
     )
   }

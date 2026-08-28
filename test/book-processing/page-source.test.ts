@@ -92,6 +92,7 @@ describe('buildPageSources', () => {
     expect(source).toMatchObject({
       captureId: 'c000000',
       availability: 'unavailable',
+      screenshotPath: 'pages/c000000.unavailable.png',
       screenshotSha256: null,
       width: null,
       height: null,
@@ -99,6 +100,72 @@ describe('buildPageSources', () => {
         category: 'source',
         code: 'screenshot-path-outside-book'
       }
+    })
+  })
+
+  test('retains a symlink escape as unavailable evidence', async () => {
+    const outDir = await createOutDir()
+    const outsideDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'kindle-page-source-outside-')
+    )
+    temporaryDirectories.push(outsideDir)
+    const outsideScreenshot = path.join(outsideDir, 'outside.png')
+    await fs.writeFile(
+      outsideScreenshot,
+      await sharp({
+        create: { width: 20, height: 10, channels: 4, background: '#ffffff' }
+      })
+        .png()
+        .toBuffer()
+    )
+    await fs.symlink(
+      outsideScreenshot,
+      path.join(outDir, 'pages', 'outside-link.png')
+    )
+
+    const [source] = await buildPageSources(
+      metadataFor('pages/outside-link.png'),
+      outDir
+    )
+
+    expect(source).toMatchObject({
+      captureId: 'c000000',
+      availability: 'unavailable',
+      screenshotPath: 'pages/outside-link.png',
+      screenshotSha256: null,
+      width: null,
+      height: null,
+      sourceFailure: {
+        category: 'source',
+        code: 'screenshot-path-outside-book'
+      }
+    })
+  })
+
+  test('retains a non-PNG screenshot as unavailable evidence', async () => {
+    const outDir = await createOutDir()
+    await fs.writeFile(
+      path.join(outDir, 'pages', 'jpeg-data.png'),
+      await sharp({
+        create: { width: 20, height: 10, channels: 4, background: '#ffffff' }
+      })
+        .jpeg()
+        .toBuffer()
+    )
+
+    const [source] = await buildPageSources(
+      metadataFor('pages/jpeg-data.png'),
+      outDir
+    )
+
+    expect(source).toMatchObject({
+      captureId: 'c000000',
+      availability: 'unavailable',
+      screenshotPath: 'pages/jpeg-data.png',
+      screenshotSha256: null,
+      width: null,
+      height: null,
+      sourceFailure: { category: 'source', code: 'screenshot-unreadable' }
     })
   })
 

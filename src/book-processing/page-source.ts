@@ -41,6 +41,23 @@ function resolveBookScreenshotPath(
   return resolvedPath
 }
 
+async function resolvePhysicalBookScreenshotPath(
+  screenshotPath: string,
+  outDir: string
+): Promise<string> {
+  const absolutePath = resolveBookScreenshotPath(screenshotPath, outDir)
+  const [realOutDir, realScreenshotPath] = await Promise.all([
+    fs.realpath(outDir),
+    fs.realpath(absolutePath)
+  ])
+
+  if (!isWithinDirectory(realScreenshotPath, realOutDir)) {
+    throw new ScreenshotPathOutsideBookError()
+  }
+
+  return realScreenshotPath
+}
+
 function normalizeBookRelativePath(
   screenshotPath: string,
   outDir: string
@@ -75,6 +92,10 @@ function sourceFailureFor(
   }
 }
 
+function unavailableScreenshotPath(captureId: string): string {
+  return `pages/${captureId}.unavailable.png`
+}
+
 function assertUniqueMetadataIndexes(metadata: BookMetadata): void {
   const indexes = new Set<number>()
 
@@ -95,15 +116,18 @@ export async function buildPageSources(
   return Promise.all(
     metadata.pages.map(async (page, index) => {
       const captureId = `c${String(index).padStart(6, '0')}`
-      let screenshotPath = page.screenshot
+      let screenshotPath = unavailableScreenshotPath(captureId)
 
       try {
         screenshotPath = normalizeBookRelativePath(page.screenshot, outDir)
-        const absolutePath = resolveBookScreenshotPath(screenshotPath, outDir)
+        const absolutePath = await resolvePhysicalBookScreenshotPath(
+          screenshotPath,
+          outDir
+        )
         const bytes = await fs.readFile(absolutePath)
         const image = await sharp(bytes).metadata()
 
-        if (!image.width || !image.height) {
+        if (image.format !== 'png' || !image.width || !image.height) {
           throw new Error('Screenshot dimensions are missing')
         }
 

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 import { describe, expect, test } from 'vitest'
 
 import type { AvailablePageSource } from '../../src/book-processing/types'
@@ -78,5 +80,17 @@ describe('createProcessorIdentity', () => {
         })
       )
     ).not.toBe(first)
+  })
+
+  test('sorts schema keys by code unit rather than host locale', () => {
+    const processor = createProcessorIdentity({
+      ...input,
+      outputSchema: { ä: 'umlaut', z: 'zee' }
+    })
+    const expectedCanonicalSchema = '{"z":"zee","ä":"umlaut"}'
+
+    expect(processor.outputSchemaSha256).toBe(
+      createHash('sha256').update(expectedCanonicalSchema).digest('hex')
+    )
   })
 })

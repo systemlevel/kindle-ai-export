@@ -10,6 +10,7 @@ import path from 'node:path'
 import { input } from '@inquirer/prompts'
 import delay from 'delay'
 import { chromium } from 'patchright'
+import sharp from 'sharp'
 
 import { parsePageNav } from './playwright-utils'
 import { assert, fileExists, getEnv } from './utils'
@@ -27,8 +28,12 @@ import { assert, fileExists, getEnv } from './utils'
  *   2. Screenshot the rendered reader image for each page to
  *      `out/<ASIN>/text-capture/page-####.png` (resumable, with end-of-book
  *      detection via consecutive-identical-screenshot hashing).
- *   3. Optionally (OCR=1) transcribe each page PNG with the local `codex` CLI
- *      and concatenate the results into `out/<ASIN>/book-text.md`.
+ *   3. Optionally (OCR=1) analyze each page PNG with the local `codex` CLI —
+ *      transcribing the text AND detecting every figure/chart/graph/diagram/
+ *      formula/table/image — then assemble `out/<ASIN>/book-text.md`. Each
+ *      visual is preserved as a cropped image under `text-capture/assets/`
+ *      (falling back to the full page image) alongside Codex's interpretation of
+ *      what it shows, so nothing visual is lost.
  *
  * Run with:  npx tsx src/capture-book-text.ts
  *   ASIN=<asin> MAX_PAGES=5            -> capture only (5 pages, smoke test)
@@ -43,13 +48,120 @@ const readerContainerSelector = '#kr-renderer'
 // Stop once this many consecutive screenshots are byte-identical (end of book).
 const identicalStopThreshold = 3
 
-// Verbatim-transcription prompt. We intentionally do NOT use the strict JSON
-// output schema here — a plain transcription written to --output-last-message
-// is read back directly as the page's text.
+// Structured OCR + visual-analysis prompt. Codex returns JSON (validated by the
+// output schema below) so we can preserve BOTH the readable text AND every
+// figure/chart/graph/diagram/formula/table/image on the page — each as a
+// cropped image plus Codex's interpretation of what it shows.
 const ocrPrompt =
-  'Transcribe every word of readable text on this book page image, verbatim ' +
-  'and in natural reading order. Output ONLY the transcribed text with ' +
-  'paragraph breaks preserved — no commentary, headers, or markup.'
+  'You are analyzing a single scanned page image from a book. Return a JSON ' +
+  'object that exactly matches the provided output schema, with two fields:\n' +
+  '- "text": every word of readable text on the page, transcribed verbatim in ' +
+  'natural reading order, with paragraph breaks preserved. No commentary, ' +
+  'headers, or markup — just the text.\n' +
+  '- "visuals": an array with one entry for EVERY figure, chart, graph, ' +
+  'diagram, mathematical formula or equation, table, or image on the page. Do ' +
+  'not miss any visual element. For each entry provide:\n' +
+  '  - "kind": one of figure, chart, graph, diagram, formula, table, image, ' +
+  'other.\n' +
+  '  - "description": a DETAILED interpretation of exactly what the visual ' +
+  'shows. For a chart or graph, describe the axes, the series, the overall ' +
+  'trend, and any notable values or payoff. For a formula, give the equation ' +
+  'and explain what it computes. For a table, summarize its structure and key ' +
+  'values. For a figure, diagram, or image, describe its content and what it ' +
+  'conveys.\n' +
+  '  - "region": a bounding box tightly around the visual, as {x, y, width, ' +
+  'height} with each value normalized to a 0..1000 scale relative to the page ' +
+  'image (x, y = the top-left corner). If you cannot confidently localize the ' +
+  'visual, set region to null.\n' +
+  'If the page has no visuals, return an empty "visuals" array. Output ONLY the ' +
+  'JSON object.'
+
+// Lenient JSON Schema handed to codex via --output-schema. It is strict enough
+// to be accepted by structured-output validation (every object closed with
+// additionalProperties:false and all properties required, nullable via a type
+// array) but imposes NO ordering/contiguity/min-size/cross-field constraints so
+// a page never fails validation.
+const ocrOutputSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['text', 'visuals'],
+  properties: {
+    text: { type: 'string' },
+    visuals: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['kind', 'description', 'region'],
+        properties: {
+          kind: {
+            type: 'string',
+            enum: [
+              'figure',
+              'chart',
+              'graph',
+              'diagram',
+              'formula',
+              'table',
+              'image',
+              'other'
+            ]
+          },
+          description: { type: 'string' },
+          region: {
+            type: ['object', 'null'],
+            additionalProperties: false,
+            required: ['x', 'y', 'width', 'height'],
+            properties: {
+              x: { type: 'number' },
+              y: { type: 'number' },
+              width: { type: 'number' },
+              height: { type: 'number' }
+            }
+          }
+        }
+      }
+    }
+  }
+} as const
+
+const visualKinds = [
+  'figure',
+  'chart',
+  'graph',
+  'diagram',
+  'formula',
+  'table',
+  'image',
+  'other'
+] as const
+type VisualKind = (typeof visualKinds)[number]
+
+interface VisualRegion {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+interface PageVisual {
+  kind: VisualKind
+  description: string
+  /** Normalized (0..1000) bounding box, or null when Codex could not localize it. */
+  region: VisualRegion | null
+}
+
+interface PageResult {
+  text: string
+  visuals: PageVisual[]
+}
+
+// Region coordinates are normalized to a 0..1000 scale on both axes (matching
+// the convention used elsewhere in the repo, e.g. book-processing/media-assets).
+const normalizedSpan = 1000
+// A crop smaller than this (in real page pixels) on either side is treated as
+// unusable, so we fall back to preserving the full page image instead.
+const minCropPx = 24
 
 type SpawnedCodex = ChildProcessByStdio<null, Readable, Readable>
 
@@ -208,9 +320,28 @@ async function main(): Promise<void> {
     return false
   }
 
+  // Dismiss any open Kindle reader overlay (settings/menu ion-popover or modal)
+  // that would otherwise intercept page-turn clicks/keys. The reader leaves these
+  // open when a menu-item selector we tried isn't found.
+  async function dismissOverlays(): Promise<void> {
+    for (let i = 0; i < 4; i++) {
+      const open = await page
+        .locator('ion-popover[is-open="true"], ion-modal[is-open="true"]')
+        .count()
+        .catch(() => 0)
+      if (!open) return
+      try {
+        await page.keyboard.press('Escape')
+      } catch {}
+      await delay(250)
+    }
+  }
+
   // Advance one page. Prefer the ArrowRight key; fall back to the reader's
   // next-page chevron. Returns whether the rendered page appears to have changed.
   async function advancePage(prevSrc: string | undefined): Promise<boolean> {
+    // Ensure nothing (a lingering settings/menu popover) intercepts the advance.
+    await dismissOverlays()
     try {
       await page.keyboard.press('ArrowRight')
     } catch {}
@@ -247,17 +378,15 @@ async function main(): Promise<void> {
         })
         .click({ timeout: 5000 })
       await delay(200)
-      await settingsButton.click() // close
-      await delay(500)
       console.log('[capture] set single-column layout')
     } catch (err) {
       console.warn(
         '[capture] could not set single-column layout (continuing):',
         (err as Error).message
       )
-      try {
-        await page.keyboard.press('Escape')
-      } catch {}
+    } finally {
+      // Always close the settings popover so it can't intercept page turns.
+      await dismissOverlays()
     }
   }
 
@@ -294,6 +423,10 @@ async function main(): Promise<void> {
         (err as Error).message
       )
       return false
+    } finally {
+      // Whether or not "Go to Page" worked, close the menu/modal we opened so
+      // a lingering ion-popover can't intercept subsequent page turns.
+      await dismissOverlays()
     }
   }
 
@@ -351,6 +484,9 @@ async function main(): Promise<void> {
 
     await setSingleColumnLayout()
     await goToStart()
+    // Belt-and-suspenders: make sure no menu/settings overlay is left open
+    // before we start turning pages.
+    await dismissOverlays()
 
     // --- Capture loop --------------------------------------------------------
     console.log(`[capture] starting capture of up to ${maxPages} pages...`)
@@ -458,63 +594,329 @@ async function runOcrPhase(options: OcrPhaseOptions): Promise<void> {
   const { captureDir, bookTextPath, codexBin, codexModel, codexTimeoutMs } =
     options
 
+  // book-text.md lives at out/<ASIN>/, the capture dir at out/<ASIN>/text-capture,
+  // and the preserved visual assets at out/<ASIN>/text-capture/assets/.
+  const outDir = path.dirname(bookTextPath)
+  const assetsDir = path.join(captureDir, 'assets')
+  await fs.mkdir(assetsDir, { recursive: true })
+
   const pngFiles = (await fs.readdir(captureDir))
     .filter((f) => /^page-\d+\.png$/.test(f))
     .toSorted()
   console.log(`[ocr] found ${pngFiles.length} captured page image(s)`)
 
-  let transcribed = 0
-  let skipped = 0
+  let analyzed = 0
+  let reused = 0
   let failed = 0
+  // Rebuild the whole markdown from the per-page JSON every run so the output is
+  // deterministic and resumable.
+  const sections: string[] = []
 
   for (const file of pngFiles) {
     const pngPath = path.join(captureDir, file)
-    const txtPath = pngPath.replace(/\.png$/, '.txt')
+    const pad = /^page-(\d+)\.png$/.exec(file)![1]!
+    const pageNumber = Number.parseInt(pad, 10)
+    const jsonPath = path.join(captureDir, `page-${pad}.json`)
 
-    if (await fileExists(txtPath)) {
-      skipped += 1
-      console.log(`[ocr] ${file}: already transcribed, skipping (resume)`)
-      continue
+    let result: PageResult | undefined
+    if (await fileExists(jsonPath)) {
+      try {
+        result = coercePageResult(
+          JSON.parse(await fs.readFile(jsonPath, 'utf8'))
+        )
+        reused += 1
+        console.log(
+          `[ocr] ${file}: reusing cached result ${path.basename(jsonPath)} (resume)`
+        )
+      } catch (err) {
+        console.warn(
+          `[ocr] ${file}: cached JSON unreadable (${(err as Error).message}); ` +
+            're-running codex'
+        )
+      }
     }
 
-    console.log(`[ocr] ${file}: transcribing with codex...`)
-    try {
-      const text = await ocrPageWithCodex(pngPath, {
-        codexBin,
-        codexModel,
-        codexTimeoutMs
-      })
-      await fs.writeFile(txtPath, `${text}\n`)
-      transcribed += 1
-      console.log(
-        `[ocr] ${file}: transcribed ${text.length} chars -> ` +
-          path.basename(txtPath)
-      )
-    } catch (err) {
-      failed += 1
-      console.error(`[ocr] ${file}: FAILED — ${(err as Error).message}`)
+    if (!result) {
+      console.log(`[ocr] ${file}: analyzing with codex...`)
+      try {
+        result = await ocrPageWithCodex(pngPath, {
+          codexBin,
+          codexModel,
+          codexTimeoutMs
+        })
+        await fs.writeFile(jsonPath, `${JSON.stringify(result, null, 2)}\n`)
+        analyzed += 1
+      } catch (err) {
+        failed += 1
+        console.error(`[ocr] ${file}: FAILED — ${(err as Error).message}`)
+        continue
+      }
     }
+
+    // Always (re)generate crops + markdown from the parsed result, whether it
+    // came fresh from codex or from the cached JSON.
+    const rendered = await renderPageSection({
+      pageNumber,
+      pad,
+      pngPath,
+      result,
+      assetsDir,
+      outDir
+    })
+    sections.push(rendered.markdown)
+
+    const assetNote = rendered.assetsWritten.length
+      ? `, assets: ${rendered.assetsWritten.map((a) => path.basename(a)).join(', ')}`
+      : ''
+    console.log(
+      `[ocr] ${file}: ${rendered.textChars} chars text, ` +
+        `${rendered.visualCount} visual(s)${assetNote}`
+    )
   }
 
-  // Concatenate every transcribed page (in order) into a single markdown file.
-  const txtFiles = (await fs.readdir(captureDir))
-    .filter((f) => /^page-\d+\.txt$/.test(f))
-    .toSorted()
-  const parts: string[] = []
-  for (const file of txtFiles) {
-    const text = (await fs.readFile(path.join(captureDir, file), 'utf8')).trim()
-    parts.push(text)
-  }
-  const combined = `${parts.join('\n\n---\n\n')}\n`
+  const combined = `${sections.join('\n\n---\n\n')}\n`
   await fs.writeFile(bookTextPath, combined)
 
   console.log(
-    `[ocr] done: ${transcribed} transcribed, ${skipped} skipped, ${failed} failed`
+    `[ocr] done: ${analyzed} analyzed, ${reused} reused, ${failed} failed`
   )
   console.log(
-    `[ocr] wrote ${bookTextPath} — ${txtFiles.length} page(s), ` +
+    `[ocr] wrote ${bookTextPath} — ${sections.length} page(s), ` +
       `${combined.length} characters`
   )
+}
+
+interface RenderPageInput {
+  pageNumber: number
+  /** Zero-padded page index string, matching the page-####.png filename. */
+  pad: string
+  pngPath: string
+  result: PageResult
+  assetsDir: string
+  outDir: string
+}
+
+interface RenderedPage {
+  markdown: string
+  visualCount: number
+  textChars: number
+  assetsWritten: string[]
+}
+
+/**
+ * Turn one page's parsed Codex result into its markdown section, preserving
+ * every visual as a real image on disk. For each visual we crop its region out
+ * of the page PNG; if the region is missing, too small, out of bounds, or the
+ * crop fails to decode, we fall back to the full page image so a visual is
+ * NEVER lost. Pages with >=1 visual also always get a full-page safety-net copy.
+ */
+async function renderPageSection(
+  input: RenderPageInput
+): Promise<RenderedPage> {
+  const { pageNumber, pad, pngPath, result, assetsDir, outDir } = input
+  const assetsWritten: string[] = []
+
+  // Real pixel dimensions of the page PNG (needed to convert normalized regions).
+  const meta = await sharp(pngPath)
+    .metadata()
+    .catch(() => undefined)
+  const pageWidth = meta?.width
+  const pageHeight = meta?.height
+
+  const fullAssetAbs = path.join(assetsDir, `page-${pad}-full.png`)
+  let fullCopied = false
+  async function ensureFullCopy(): Promise<void> {
+    if (fullCopied) return
+    await fs.copyFile(pngPath, fullAssetAbs)
+    fullCopied = true
+    assetsWritten.push(fullAssetAbs)
+  }
+
+  const relFromOut = (abs: string): string =>
+    path.relative(outDir, abs).split(path.sep).join('/')
+
+  const visualBlocks: string[] = []
+  for (let i = 0; i < result.visuals.length; i++) {
+    const visual = result.visuals[i]!
+    const figId = i + 1
+
+    let assetAbs = fullAssetAbs
+    let cropped = false
+    if (visual.region && pageWidth && pageHeight) {
+      const cropAbs = path.join(assetsDir, `page-${pad}-fig-${figId}.png`)
+      const ok = await cropVisual(
+        pngPath,
+        visual.region,
+        pageWidth,
+        pageHeight,
+        cropAbs
+      )
+      if (ok) {
+        assetAbs = cropAbs
+        assetsWritten.push(cropAbs)
+        cropped = true
+      }
+    }
+    if (!cropped) {
+      // region null / crop out of bounds / too small / sharp failure -> full page.
+      await ensureFullCopy()
+    }
+
+    const relPath = relFromOut(assetAbs)
+    const kindLabel = capitalize(visual.kind)
+    const altText = visual.description
+      .replaceAll(/\s+/g, ' ')
+      .replaceAll(/[[\]]/g, '')
+      .trim()
+      .slice(0, 80)
+    // Keep multi-line descriptions inside the blockquote by prefixing wrapped
+    // lines with "> " so the full analysis is preserved verbatim.
+    const quoted = (
+      visual.description.trim() || '(no description provided)'
+    ).replaceAll(/\r?\n/g, '\n> ')
+    visualBlocks.push(
+      `![${visual.kind} — ${altText}](${relPath})\n` +
+        `> **${kindLabel} (page ${pageNumber}):** ${quoted}`
+    )
+  }
+
+  const parts: string[] = []
+  const trimmedText = result.text.trim()
+  if (trimmedText) parts.push(trimmedText)
+  parts.push(...visualBlocks)
+
+  if (result.visuals.length > 0) {
+    // Safety net: always link the untouched full page for any page with visuals.
+    await ensureFullCopy()
+    parts.push(
+      `> _Full page image:_ [page ${pageNumber}](${relFromOut(fullAssetAbs)})`
+    )
+  }
+
+  return {
+    markdown: parts.join('\n\n'),
+    visualCount: result.visuals.length,
+    textChars: trimmedText.length,
+    assetsWritten
+  }
+}
+
+/**
+ * Crop a normalized (0..1000) region out of the page PNG to `destAbs` and verify
+ * the result decodes as PNG. Returns false (never throws) when the region maps
+ * to a rectangle smaller than `minCropPx` on a side or Sharp fails, so the
+ * caller can fall back to preserving the full page image.
+ */
+async function cropVisual(
+  pngPath: string,
+  region: VisualRegion,
+  pageWidth: number,
+  pageHeight: number,
+  destAbs: string
+): Promise<boolean> {
+  const left = Math.floor((region.x / normalizedSpan) * pageWidth)
+  const top = Math.floor((region.y / normalizedSpan) * pageHeight)
+  const right = Math.ceil(
+    ((region.x + region.width) / normalizedSpan) * pageWidth
+  )
+  const bottom = Math.ceil(
+    ((region.y + region.height) / normalizedSpan) * pageHeight
+  )
+
+  const clampedLeft = Math.min(Math.max(left, 0), pageWidth)
+  const clampedTop = Math.min(Math.max(top, 0), pageHeight)
+  const clampedRight = Math.min(Math.max(right, clampedLeft), pageWidth)
+  const clampedBottom = Math.min(Math.max(bottom, clampedTop), pageHeight)
+
+  const width = clampedRight - clampedLeft
+  const height = clampedBottom - clampedTop
+  if (width < minCropPx || height < minCropPx) return false
+
+  try {
+    await sharp(pngPath)
+      .extract({ left: clampedLeft, top: clampedTop, width, height })
+      .png()
+      .toFile(destAbs)
+    const cropMeta = await sharp(destAbs).metadata()
+    return cropMeta.format === 'png' && !!cropMeta.width && !!cropMeta.height
+  } catch (err) {
+    console.error(
+      `[ocr] crop failed for ${path.basename(destAbs)}: ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    )
+    return false
+  }
+}
+
+function capitalize(value: string): string {
+  return value ? value.charAt(0).toUpperCase() + value.slice(1) : value
+}
+
+function coerceKind(value: unknown): VisualKind {
+  const s = typeof value === 'string' ? value.trim().toLowerCase() : ''
+  return (visualKinds as readonly string[]).includes(s)
+    ? (s as VisualKind)
+    : 'other'
+}
+
+function coerceRegion(value: unknown): VisualRegion | null {
+  if (!value || typeof value !== 'object') return null
+  const o = value as Record<string, unknown>
+  const x = Number(o.x)
+  const y = Number(o.y)
+  const width = Number(o.width)
+  const height = Number(o.height)
+  if (![x, y, width, height].every((n) => Number.isFinite(n))) return null
+  return { x, y, width, height }
+}
+
+function coerceVisual(value: unknown): PageVisual {
+  const o =
+    value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  return {
+    kind: coerceKind(o.kind),
+    description: typeof o.description === 'string' ? o.description : '',
+    region: coerceRegion(o.region)
+  }
+}
+
+/**
+ * Leniently coerce an already-parsed object into a PageResult. Missing/invalid
+ * fields degrade gracefully (empty text, empty visuals, null regions) so a page
+ * never hard-fails.
+ */
+function coercePageResult(value: unknown): PageResult {
+  const o =
+    value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  return {
+    text: typeof o.text === 'string' ? o.text : '',
+    visuals: Array.isArray(o.visuals) ? o.visuals.map(coerceVisual) : []
+  }
+}
+
+/**
+ * Parse the raw --output-last-message string into a PageResult. If JSON parsing
+ * fails entirely, fall back to treating the whole message as plain text with no
+ * visuals so a page never hard-fails.
+ */
+function parsePageResult(raw: string): PageResult {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    // Some models wrap the JSON in a ```json fenced block; try to recover it.
+    const fenced = /```(?:json)?\s*([\S\s]*?)```/i.exec(raw)
+    if (fenced?.[1]) {
+      try {
+        parsed = JSON.parse(fenced[1])
+      } catch {}
+    }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { text: raw, visuals: [] }
+  }
+  return coercePageResult(parsed)
 }
 
 interface CodexOcrOptions {
@@ -524,20 +926,24 @@ interface CodexOcrOptions {
 }
 
 /**
- * OCR a single page PNG via the local `codex` CLI, using the verified
- * invocation (stdin closed; final transcription written to
- * `--output-last-message`). Returns the transcribed text.
+ * Analyze a single page PNG via the local `codex` CLI, using the verified
+ * invocation (stdin closed; final structured message written to
+ * `--output-last-message`) plus `--output-schema` so codex returns JSON. Returns
+ * the parsed `{ text, visuals }` result. Never hard-fails on malformed JSON —
+ * the raw message is preserved as plain text with no visuals in that case.
  */
 async function ocrPageWithCodex(
   pngPath: string,
   options: CodexOcrOptions
-): Promise<string> {
+): Promise<PageResult> {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kindle-ocr-'))
-  const resultPath = path.join(tmpDir, 'result.txt')
+  const resultPath = path.join(tmpDir, 'result.json')
+  const schemaPath = path.join(tmpDir, 'schema.json')
   const absImage = path.resolve(pngPath)
 
   try {
-    await spawnCodex(absImage, tmpDir, resultPath, options)
+    await fs.writeFile(schemaPath, JSON.stringify(ocrOutputSchema, null, 2))
+    await spawnCodex(absImage, tmpDir, resultPath, schemaPath, options)
 
     // Bound the untrusted result file before reading it into memory.
     const stats = await fs.stat(resultPath).catch(() => undefined)
@@ -548,9 +954,9 @@ async function ocrPageWithCodex(
     }
     if (stats.size === 0) throw new Error('codex produced an empty output file')
 
-    const text = (await fs.readFile(resultPath, 'utf8')).trim()
-    if (!text) throw new Error('codex output was blank after trimming')
-    return text
+    const raw = (await fs.readFile(resultPath, 'utf8')).trim()
+    if (!raw) throw new Error('codex output was blank after trimming')
+    return parsePageResult(raw)
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
   }
@@ -560,6 +966,7 @@ function spawnCodex(
   imagePath: string,
   cwd: string,
   resultPath: string,
+  schemaPath: string,
   options: CodexOcrOptions
 ): Promise<void> {
   const args = [
@@ -574,6 +981,8 @@ function spawnCodex(
     cwd,
     '--image',
     imagePath,
+    '--output-schema',
+    schemaPath,
     '--output-last-message',
     resultPath,
     '--json'

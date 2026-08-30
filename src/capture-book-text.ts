@@ -208,6 +208,12 @@ async function main(): Promise<void> {
   const ocrEnabled = getEnv('OCR') === '1' || getEnv('OCR') === 'true'
   const codexBin = getEnv('CODEX_BIN') || 'codex'
   const codexModel = getEnv('CODEX_MODEL') || undefined
+  // Codex reasoning effort. `--ignore-user-config` bypasses ~/.codex/config.toml,
+  // so we set this explicitly via `-c model_reasoning_effort=`. Defaults to xhigh
+  // so figure/formula/chart interpretation gets full reasoning; override with
+  // CODEX_REASONING_EFFORT (e.g. minimal | low | medium | high | xhigh).
+  const codexReasoningEffort =
+    getEnv('CODEX_REASONING_EFFORT')?.trim() || 'xhigh'
   const codexTimeoutMs = parsePositiveIntEnv('CODEX_TIMEOUT_MS', 300_000)
 
   const outDir = path.join('out', asin)
@@ -591,6 +597,7 @@ async function main(): Promise<void> {
     bookTextPath,
     codexBin,
     codexModel,
+    codexReasoningEffort,
     codexTimeoutMs
   })
 }
@@ -600,12 +607,19 @@ interface OcrPhaseOptions {
   bookTextPath: string
   codexBin: string
   codexModel: string | undefined
+  codexReasoningEffort: string
   codexTimeoutMs: number
 }
 
 async function runOcrPhase(options: OcrPhaseOptions): Promise<void> {
-  const { captureDir, bookTextPath, codexBin, codexModel, codexTimeoutMs } =
-    options
+  const {
+    captureDir,
+    bookTextPath,
+    codexBin,
+    codexModel,
+    codexReasoningEffort,
+    codexTimeoutMs
+  } = options
 
   // book-text.md lives at out/<ASIN>/, the capture dir at out/<ASIN>/text-capture,
   // and the preserved visual assets at out/<ASIN>/text-capture/assets/.
@@ -617,6 +631,10 @@ async function runOcrPhase(options: OcrPhaseOptions): Promise<void> {
     .filter((f) => /^page-\d+\.png$/.test(f))
     .toSorted()
   console.log(`[ocr] found ${pngFiles.length} captured page image(s)`)
+  console.log(
+    `[ocr] codex model=${codexModel ?? 'default (gpt-5.6-sol)'} ` +
+      `reasoning_effort=${codexReasoningEffort}`
+  )
 
   let analyzed = 0
   let reused = 0
@@ -655,6 +673,7 @@ async function runOcrPhase(options: OcrPhaseOptions): Promise<void> {
         result = await ocrPageWithCodex(pngPath, {
           codexBin,
           codexModel,
+          codexReasoningEffort,
           codexTimeoutMs
         })
         await fs.writeFile(jsonPath, `${JSON.stringify(result, null, 2)}\n`)
@@ -935,6 +954,7 @@ function parsePageResult(raw: string): PageResult {
 interface CodexOcrOptions {
   codexBin: string
   codexModel: string | undefined
+  codexReasoningEffort: string
   codexTimeoutMs: number
 }
 
@@ -1000,6 +1020,12 @@ function spawnCodex(
     resultPath,
     '--json'
   ]
+  // --ignore-user-config drops the user's config.toml, so set reasoning effort
+  // explicitly. Passed as a `-c` override (bare value; codex treats a non-TOML
+  // value as a literal string, e.g. model_reasoning_effort=xhigh).
+  if (options.codexReasoningEffort) {
+    args.push('-c', `model_reasoning_effort=${options.codexReasoningEffort}`)
+  }
   if (options.codexModel) args.push('--model', options.codexModel)
   args.push(ocrPrompt)
 

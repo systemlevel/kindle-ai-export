@@ -23,6 +23,12 @@ if (process.env.FAKE_CODEX_ARGUMENT_LOG) {
     mode: 0o600
   })
 }
+if (process.env.FAKE_CODEX_SCHEMA_COPY) {
+  const schemaIndex = args.indexOf('--output-schema')
+  if (schemaIndex >= 0) {
+    fs.copyFileSync(args[schemaIndex + 1], process.env.FAKE_CODEX_SCHEMA_COPY)
+  }
+}
 if (process.env.FAKE_CODEX_PID_PATH) {
   fs.writeFileSync(process.env.FAKE_CODEX_PID_PATH, String(process.pid), {
     mode: 0o600
@@ -84,6 +90,26 @@ if (scenario === 'hang-term' || scenario === 'hang-ignore-term') {
   setInterval(() => undefined, 1000)
 }
 
+if (scenario === 'page-analysis') {
+  if (outputPath)
+    fs.writeFileSync(
+      outputPath,
+      JSON.stringify({
+        text: 'Codex page text',
+        visuals: [
+          {
+            kind: 'formula',
+            description: 'E = mc^2',
+            region: null
+          }
+        ]
+      }),
+      { mode: 0o600 }
+    )
+  event({ type: 'turn.completed' })
+  process.exit(0)
+}
+
 if (scenario === 'missing-output') {
   event({ type: 'turn.completed' })
   process.exit(0)
@@ -102,7 +128,8 @@ if (scenario === 'wrong-page-ids') {
 }
 
 if (scenario === 'result-overflow') {
-  if (outputPath) fs.writeFileSync(outputPath, 'x'.repeat(2_048), { mode: 0o600 })
+  if (outputPath)
+    fs.writeFileSync(outputPath, 'x'.repeat(2_048), { mode: 0o600 })
   event({ type: 'turn.completed' })
   process.exit(0)
 }

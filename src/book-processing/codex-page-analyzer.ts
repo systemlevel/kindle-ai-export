@@ -146,6 +146,13 @@ async function analyzePageWithCodex(
     if (run.overflow) {
       throw new Error(`codex ${run.overflow} exceeded its size limit`)
     }
+    // The JSONL event stream carries the real reason for a failed turn (an
+    // unsupported --model, a rate limit, ...); stderr is mostly unrelated
+    // noise, so report the event reason first.
+    const events = scanCodexEvents(run.stdout)
+    if (events.failureReason) {
+      throw new Error(`codex turn failed: ${events.failureReason}`)
+    }
     if (run.exitCode !== 0) {
       const sample = diagnosticSample(run.stderr)
       throw new Error(
@@ -154,7 +161,7 @@ async function analyzePageWithCodex(
           (sample ? `: ${sample}` : '')
       )
     }
-    if (!sawTurnCompleted(run.stdout)) {
+    if (!events.turnCompleted) {
       console.warn(
         '[analyze] codex exited 0 but no turn.completed event was seen; ' +
           'relying on the output file'
@@ -177,13 +184,55 @@ async function analyzePageWithCodex(
   }
 }
 
-function sawTurnCompleted(stdoutJsonl: string): boolean {
+interface CodexEventSummary {
+  turnCompleted: boolean
+  /** Human-readable reason from a `turn.failed` (or bare `error`) event. */
+  failureReason: string | undefined
+}
+
+function scanCodexEvents(stdoutJsonl: string): CodexEventSummary {
+  const summary: CodexEventSummary = {
+    turnCompleted: false,
+    failureReason: undefined
+  }
   for (const line of stdoutJsonl.split('\n')) {
     if (!line.trim()) continue
+    let event: {
+      type?: string
+      message?: unknown
+      error?: { message?: unknown }
+    }
     try {
-      const event = JSON.parse(line) as { type?: string }
-      if (event.type === 'turn.completed') return true
-    } catch {}
+      event = JSON.parse(line) as typeof event
+    } catch {
+      continue
+    }
+    if (event.type === 'turn.completed') summary.turnCompleted = true
+    if (event.type === 'turn.failed') {
+      summary.failureReason =
+        unwrapErrorMessage(event.error?.message) ?? summary.failureReason
+    } else if (event.type === 'error' && !summary.failureReason) {
+      summary.failureReason = unwrapErrorMessage(event.message)
+    }
   }
-  return false
+  if (summary.failureReason) {
+    summary.failureReason = diagnosticSample(summary.failureReason)
+  }
+  return summary
+}
+
+/** Codex nests the API error as a JSON-encoded string
+ * (`{"type":"error","status":400,"error":{"message":"..."}}`); pull out the
+ * innermost human-readable message when that is the case. */
+function unwrapErrorMessage(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined
+  try {
+    const parsed = JSON.parse(value) as {
+      error?: { message?: unknown }
+      message?: unknown
+    }
+    if (typeof parsed?.error?.message === 'string') return parsed.error.message
+    if (typeof parsed?.message === 'string') return parsed.message
+  } catch {}
+  return value
 }

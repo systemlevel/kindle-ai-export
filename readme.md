@@ -264,6 +264,7 @@ ASIN=B0819W19WD ANALYZER=claude REPROCESS=1 npx tsx src/analyze-book-text.ts
 ASIN=B0819W19WD REPROCESS=1 PAGES=1-20,45 npx tsx src/analyze-book-text.ts
 ```
 
+- Pick the model per backend with `CODEX_MODEL` (for example `gpt-5.6-sol`) or `CLAUDE_CLI_MODEL` (an alias such as `opus`, or a full name such as `claude-opus-5`). Leave them empty to use each CLI's default. The run logs the model it is using, and a model the CLI does not accept fails the page with the CLI's own reason.
 - `REPROCESS=1` re-analyzes pages that already have a `page-####.json`; without it the run resumes and only fills in missing pages.
 - `PAGES=` limits which pages may be sent to the model. Pages outside the selection keep their existing results.
 - A page's previous result is only replaced after a successful analysis, so a failed page never loses data. Failed pages are listed at the end together with a ready-to-use `PAGES=` value to retry them, and the script exits non-zero.

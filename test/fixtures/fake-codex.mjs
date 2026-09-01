@@ -74,6 +74,37 @@ if (scenario === 'rate-limit') {
   process.exit(1)
 }
 
+if (scenario === 'turn-failed-model') {
+  // Mirrors the real CLI when --model names an unsupported model: stderr
+  // carries unrelated cache noise, the JSONL carries the actual reason as a
+  // JSON-encoded string inside `error.message`, and the process exits 1.
+  process.stderr.write(
+    'Reading additional input from stdin...\n' +
+      'ERROR codex_models_manager::manager: failed to renew cache TTL\n'
+  )
+  event({
+    type: 'item.completed',
+    item: {
+      id: 'item_0',
+      type: 'error',
+      message: 'Model metadata for `not-a-real-model` not found.'
+    }
+  })
+  event({ type: 'turn.started' })
+  const reason = JSON.stringify({
+    type: 'error',
+    status: 400,
+    error: {
+      type: 'invalid_request_error',
+      message:
+        "The 'not-a-real-model' model is not supported when using Codex with a ChatGPT account."
+    }
+  })
+  event({ type: 'error', message: reason })
+  event({ type: 'turn.failed', error: { message: reason } })
+  process.exit(1)
+}
+
 if (scenario === 'stderr-overflow') {
   process.stderr.write('x'.repeat(2_048))
   process.exit(0)

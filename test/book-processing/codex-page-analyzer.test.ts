@@ -155,6 +155,26 @@ describe('createCodexPageAnalyzer', () => {
     )
   })
 
+  test('surfaces the turn.failed reason when the model is unsupported', async () => {
+    const { pngPath, env } = await fixture('turn-failed-model')
+    const analyzer = createCodexPageAnalyzer({
+      codexBin: fixturePath,
+      model: 'not-a-real-model',
+      reasoningEffort: 'xhigh',
+      timeoutMs: 5000,
+      env
+    })
+    const failure = await analyzer
+      .analyzePage(pngPath)
+      .catch((err: Error) => err)
+    expect(failure).toBeInstanceOf(Error)
+    const message = (failure as Error).message
+    expect(message).toMatch(
+      /'not-a-real-model' model is not supported when using Codex/
+    )
+    expect(message).not.toMatch(/cache TTL|stdin/)
+  })
+
   test('terminates a hung process after the timeout', async () => {
     const { pngPath, env } = await fixture('hang-ignore-term')
     const analyzer = createCodexPageAnalyzer({

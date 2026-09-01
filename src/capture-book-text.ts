@@ -176,6 +176,12 @@ const normalizedSpan = 1000
 // unusable, so we fall back to preserving the full page image instead.
 const minCropPx = 24
 
+// Codex can fail transiently (models-cache TTL errors, rate limits, network
+// blips). Retry a page this many times, backing off by this base delay per
+// attempt, before flagging it as a failed page in the output.
+const codexRetryAttempts = 3
+const codexRetryBaseDelayMs = 3000
+
 type SpawnedCodex = ChildProcessByStdio<null, Readable, Readable>
 
 function sha256(buffer: Buffer): string {
@@ -639,6 +645,7 @@ async function runOcrPhase(options: OcrPhaseOptions): Promise<void> {
   let analyzed = 0
   let reused = 0
   let failed = 0
+  const failedPages: number[] = []
   // Rebuild the whole markdown from the per-page JSON every run so the output is
   // deterministic and resumable.
   const sections: string[] = []
@@ -669,20 +676,59 @@ async function runOcrPhase(options: OcrPhaseOptions): Promise<void> {
 
     if (!result) {
       console.log(`[ocr] ${file}: analyzing with codex...`)
-      try {
-        result = await ocrPageWithCodex(pngPath, {
-          codexBin,
-          codexModel,
-          codexReasoningEffort,
-          codexTimeoutMs
-        })
-        await fs.writeFile(jsonPath, `${JSON.stringify(result, null, 2)}\n`)
-        analyzed += 1
-      } catch (err) {
-        failed += 1
-        console.error(`[ocr] ${file}: FAILED — ${(err as Error).message}`)
-        continue
+      // Codex can fail transiently (models-cache TTL errors, rate limits,
+      // network blips). Retry with backoff before giving up on a page.
+      let lastError: Error | undefined
+      for (let attempt = 1; attempt <= codexRetryAttempts; attempt++) {
+        try {
+          result = await ocrPageWithCodex(pngPath, {
+            codexBin,
+            codexModel,
+            codexReasoningEffort,
+            codexTimeoutMs
+          })
+          await fs.writeFile(jsonPath, `${JSON.stringify(result, null, 2)}\n`)
+          analyzed += 1
+          lastError = undefined
+          break
+        } catch (err) {
+          lastError = err as Error
+          if (attempt < codexRetryAttempts) {
+            const backoffMs = codexRetryBaseDelayMs * attempt
+            console.warn(
+              `[ocr] ${file}: attempt ${attempt}/${codexRetryAttempts} failed ` +
+                `(${lastError.message}); retrying in ${backoffMs}ms`
+            )
+            await delay(backoffMs)
+          }
+        }
       }
+
+      if (lastError) {
+        failed += 1
+        failedPages.push(pageNumber)
+        console.error(
+          `[ocr] ${file}: FAILED after ${codexRetryAttempts} attempt(s) — ` +
+            `${lastError.message}`
+        )
+      }
+    }
+
+    // NEVER silently skip a page. If analysis failed we still emit a section
+    // that flags the gap and preserves the original page image, so the page's
+    // content is never lost and the failure is visible in the output. No JSON is
+    // cached for a failed page, so simply re-running retries just these pages.
+    if (!result) {
+      sections.push(
+        await renderFailedPageSection({
+          pageNumber,
+          pad,
+          pngPath,
+          assetsDir,
+          outDir
+        })
+      )
+      continue
     }
 
     // Always (re)generate crops + markdown from the parsed result, whether it
@@ -716,6 +762,64 @@ async function runOcrPhase(options: OcrPhaseOptions): Promise<void> {
     `[ocr] wrote ${bookTextPath} — ${sections.length} page(s), ` +
       `${combined.length} characters`
   )
+
+  // Make failures impossible to miss: name every page that needs a retry and
+  // exit non-zero so a failed run isn't mistaken for a clean one.
+  if (failedPages.length > 0) {
+    console.error(
+      `[ocr] ${failedPages.length} page(s) FAILED analysis and are marked as ` +
+        `gaps in ${path.basename(bookTextPath)}: ` +
+        failedPages.join(', ')
+    )
+    console.error(
+      '[ocr] their page images are preserved; re-run the same command to ' +
+        'retry only the failed pages (successful pages are cached).'
+    )
+    process.exitCode = 1
+  }
+}
+
+interface FailedPageInput {
+  pageNumber: number
+  pad: string
+  pngPath: string
+  assetsDir: string
+  outDir: string
+}
+
+/**
+ * Markdown for a page whose Codex analysis failed. We never drop the page: the
+ * original captured image is preserved as an asset and embedded, so the content
+ * is still there for a human (or a later pass) to read, and the gap is clearly
+ * flagged rather than silently missing.
+ */
+async function renderFailedPageSection(
+  input: FailedPageInput
+): Promise<string> {
+  const { pageNumber, pad, pngPath, assetsDir, outDir } = input
+  const fullAssetAbs = path.join(assetsDir, `page-${pad}-full.png`)
+  let rel: string | undefined
+  try {
+    await fs.copyFile(pngPath, fullAssetAbs)
+    rel = path.relative(outDir, fullAssetAbs).split(path.sep).join('/')
+  } catch (err) {
+    console.warn(
+      `[ocr] page ${pageNumber}: could not preserve full page image — ` +
+        `${(err as Error).message}`
+    )
+  }
+
+  const lines = [
+    `> **⚠️ Page ${pageNumber}: automated analysis FAILED — text not ` +
+      'transcribed.**',
+    '>',
+    '> The captured page image is preserved below so no content is lost. ' +
+      'Re-run the OCR step to retry only this page.'
+  ]
+  if (rel) {
+    lines.push('', `![Page ${pageNumber} (not transcribed)](${rel})`)
+  }
+  return lines.join('\n')
 }
 
 interface RenderPageInput {

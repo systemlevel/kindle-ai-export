@@ -9,6 +9,7 @@ import {
   createPageAnalyzer,
   loadAnalyzerConfig
 } from './book-processing/analyzer-config'
+import { resolveBookDir } from './book-processing/book-dir'
 import {
   type AnalysisLogger,
   type AnalysisPhaseSummary,
@@ -28,8 +29,13 @@ import {
  * cropped into `text-capture/assets/`, and `out/<ASIN>/book-text.md` is
  * rebuilt.
  *
+ * The book folder may have been renamed from the ASIN to the book's title, so a
+ * book can be addressed by ASIN (`ASIN=`) or by folder name (`BOOK=`); see
+ * `resolveBookDir` for the lookup rules.
+ *
  * Run with:  npx tsx src/analyze-book-text.ts
  *   ASIN=<asin>                             -> resume: analyze pages missing a result (codex)
+ *   BOOK="<title>"                          -> same, addressing the book by its folder name
  *   ASIN=<asin> ANALYZER=claude             -> same, using the Claude Code CLI
  *   ASIN=<asin> REPROCESS=1                 -> re-analyze EVERY page, replacing results
  *   ASIN=<asin> REPROCESS=1 PAGES=1-20,45   -> re-analyze only the selected pages
@@ -47,6 +53,8 @@ export interface AnalyzeBookOptions {
 
 export interface AnalyzeBookResult {
   asin: string
+  /** Folder name under `out/` that was analyzed (ASIN or title). */
+  folder: string
   backend: AnalyzerBackend
   summary: AnalysisPhaseSummary
 }
@@ -56,11 +64,15 @@ export async function analyzeBook(
 ): Promise<AnalyzeBookResult> {
   const { cwd = process.cwd(), env, log = defaultAnalysisLogger } = options
 
-  const asin = env.ASIN?.trim()
-  if (!asin) throw new Error('ASIN is required (set it in .env)')
+  const bookReference = env.BOOK?.trim() || env.ASIN?.trim()
+  if (!bookReference) {
+    throw new Error(
+      'BOOK (folder name under out/) or ASIN is required (set it in .env)'
+    )
+  }
   const config = loadAnalyzerConfig(env)
 
-  const outDir = path.join(cwd, 'out', asin)
+  const { outDir, asin, folder } = await resolveBookDir(cwd, bookReference)
   const captureDir = path.join(outDir, 'text-capture')
   const bookTextPath = path.join(outDir, 'book-text.md')
 
@@ -73,7 +85,8 @@ export async function analyzeBook(
   }
 
   log.info(
-    `ASIN=${asin} backend=${config.backend} reprocess=${config.reprocess} ` +
+    `ASIN=${asin} folder=${JSON.stringify(folder)} backend=${config.backend} ` +
+      `reprocess=${config.reprocess} ` +
       `pages=${config.pages ? formatPageList(config.pages) : 'all'} ` +
       `captureDir=${captureDir}`
   )
@@ -90,17 +103,17 @@ export async function analyzeBook(
     pages: config.pages,
     log
   })
-  return { asin, backend: config.backend, summary }
+  return { asin, folder, backend: config.backend, summary }
 }
 
 async function main(): Promise<void> {
   try {
-    const { asin, backend, summary } = await analyzeBook({
+    const { asin, folder, backend, summary } = await analyzeBook({
       cwd: process.cwd(),
       env: process.env
     })
     console.log(
-      `[analyze] finished ASIN=${asin} backend=${backend}: ` +
+      `[analyze] finished ASIN=${asin} folder=${JSON.stringify(folder)} backend=${backend}: ` +
         `${summary.analyzed} analyzed, ${summary.reused} reused, ` +
         `${summary.failed} failed, ${summary.skipped} skipped -> ` +
         summary.outputPath

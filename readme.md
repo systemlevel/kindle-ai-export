@@ -257,6 +257,12 @@ ASIN=B0819W19WD npx tsx src/analyze-book-text.ts
 # same, using the Claude Code CLI
 ASIN=B0819W19WD ANALYZER=claude npx tsx src/analyze-book-text.ts
 
+# address the book by its folder name instead of the ASIN (after renaming out/<ASIN> to the title)
+BOOK="The Options Playbook" ANALYZER=claude npx tsx src/analyze-book-text.ts
+
+# address the book by its folder name instead of the ASIN (after renaming out/<ASIN> to the title)
+BOOK="The Options Playbook" ANALYZER=claude npx tsx src/analyze-book-text.ts
+
 # reprocess: re-analyze EVERY page, replacing the existing results
 ASIN=B0819W19WD ANALYZER=claude REPROCESS=1 npx tsx src/analyze-book-text.ts
 
@@ -264,6 +270,8 @@ ASIN=B0819W19WD ANALYZER=claude REPROCESS=1 npx tsx src/analyze-book-text.ts
 ASIN=B0819W19WD REPROCESS=1 PAGES=1-20,45 npx tsx src/analyze-book-text.ts
 ```
 
+- A book is addressed with `ASIN=` or `BOOK=` (a folder name under `out/`, case-insensitive). If `out/<ASIN>/` was renamed to the book's title, `ASIN=` still finds it through the `asin` recorded in `text-capture/capture-state.json`. An unknown reference fails immediately and lists the available books.
+- A book is addressed with `ASIN=` or `BOOK=` (a folder name under `out/`, case-insensitive). If `out/<ASIN>/` was renamed to the book's title, `ASIN=` still finds it through the `asin` recorded in `text-capture/capture-state.json`. An unknown reference fails immediately and lists the available books.
 - Pick the model per backend with `CODEX_MODEL` (for example `gpt-5.6-sol`) or `CLAUDE_CLI_MODEL` (an alias such as `opus`, or a full name such as `claude-opus-5`). Leave them empty to use each CLI's default. The run logs the model it is using, and a model the CLI does not accept fails the page with the CLI's own reason.
 - `REPROCESS=1` re-analyzes pages that already have a `page-####.json`; without it the run resumes and only fills in missing pages.
 - `PAGES=` limits which pages may be sent to the model. Pages outside the selection keep their existing results.

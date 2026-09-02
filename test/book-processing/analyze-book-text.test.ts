@@ -131,6 +131,55 @@ describe('analyzeBook', () => {
     expect(pageJson.analyzer.effort).toBe('high')
   })
 
+  test('addresses a book by its title folder with BOOK=', async () => {
+    const { cwd, outDir, captureDir } = await createBookFixture(1)
+    await fs.writeFile(
+      path.join(captureDir, 'capture-state.json'),
+      JSON.stringify({ asin: 'TESTASIN', capturedPages: 1 })
+    )
+    const titleDir = path.join(cwd, 'out', 'Test Book Title')
+    await fs.rename(outDir, titleDir)
+
+    const env = baseEnv({
+      ANALYZER: 'claude',
+      CLAUDE_CLI_BIN: fakeClaudePath,
+      FAKE_CLAUDE_SCENARIO: 'success',
+      BOOK: 'Test Book Title'
+    })
+    delete env.ASIN
+    const result = await analyzeBook({ cwd, env, log: silentLog })
+
+    expect(result.asin).toBe('TESTASIN')
+    expect(result.folder).toBe('Test Book Title')
+    expect(result.summary).toMatchObject({ analyzed: 1, failed: 0 })
+    await expect(
+      fs.access(path.join(titleDir, 'book-text.md'))
+    ).resolves.toBeUndefined()
+  })
+
+  test('finds a renamed title folder from its ASIN', async () => {
+    const { cwd, outDir, captureDir } = await createBookFixture(1)
+    await fs.writeFile(
+      path.join(captureDir, 'capture-state.json'),
+      JSON.stringify({ asin: 'TESTASIN', capturedPages: 1 })
+    )
+    await fs.rename(outDir, path.join(cwd, 'out', 'Test Book Title'))
+
+    const result = await analyzeBook({
+      cwd,
+      env: baseEnv({
+        ANALYZER: 'claude',
+        CLAUDE_CLI_BIN: fakeClaudePath,
+        FAKE_CLAUDE_SCENARIO: 'success'
+      }),
+      log: silentLog
+    })
+
+    expect(result.asin).toBe('TESTASIN')
+    expect(result.folder).toBe('Test Book Title')
+    expect(result.summary).toMatchObject({ analyzed: 1, failed: 0 })
+  })
+
   test('reprocesses existing results with the Codex backend', async () => {
     const { cwd, outDir, captureDir } = await createBookFixture(1)
     await fs.writeFile(

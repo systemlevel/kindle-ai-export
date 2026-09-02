@@ -23,6 +23,12 @@ if (process.env.FAKE_CODEX_ARGUMENT_LOG) {
     mode: 0o600
   })
 }
+if (process.env.FAKE_CODEX_SCHEMA_COPY) {
+  const schemaIndex = args.indexOf('--output-schema')
+  if (schemaIndex >= 0) {
+    fs.copyFileSync(args[schemaIndex + 1], process.env.FAKE_CODEX_SCHEMA_COPY)
+  }
+}
 if (process.env.FAKE_CODEX_PID_PATH) {
   fs.writeFileSync(process.env.FAKE_CODEX_PID_PATH, String(process.pid), {
     mode: 0o600
@@ -68,6 +74,37 @@ if (scenario === 'rate-limit') {
   process.exit(1)
 }
 
+if (scenario === 'turn-failed-model') {
+  // Mirrors the real CLI when --model names an unsupported model: stderr
+  // carries unrelated cache noise, the JSONL carries the actual reason as a
+  // JSON-encoded string inside `error.message`, and the process exits 1.
+  process.stderr.write(
+    'Reading additional input from stdin...\n' +
+      'ERROR codex_models_manager::manager: failed to renew cache TTL\n'
+  )
+  event({
+    type: 'item.completed',
+    item: {
+      id: 'item_0',
+      type: 'error',
+      message: 'Model metadata for `not-a-real-model` not found.'
+    }
+  })
+  event({ type: 'turn.started' })
+  const reason = JSON.stringify({
+    type: 'error',
+    status: 400,
+    error: {
+      type: 'invalid_request_error',
+      message:
+        "The 'not-a-real-model' model is not supported when using Codex with a ChatGPT account."
+    }
+  })
+  event({ type: 'error', message: reason })
+  event({ type: 'turn.failed', error: { message: reason } })
+  process.exit(1)
+}
+
 if (scenario === 'stderr-overflow') {
   process.stderr.write('x'.repeat(2_048))
   process.exit(0)
@@ -82,6 +119,26 @@ if (scenario === 'hang-term' || scenario === 'hang-ignore-term') {
   if (scenario === 'hang-term') process.on('SIGTERM', () => process.exit(0))
   process.on('SIGTERM', () => undefined)
   setInterval(() => undefined, 1000)
+}
+
+if (scenario === 'page-analysis') {
+  if (outputPath)
+    fs.writeFileSync(
+      outputPath,
+      JSON.stringify({
+        text: 'Codex page text',
+        visuals: [
+          {
+            kind: 'formula',
+            description: 'E = mc^2',
+            region: null
+          }
+        ]
+      }),
+      { mode: 0o600 }
+    )
+  event({ type: 'turn.completed' })
+  process.exit(0)
 }
 
 if (scenario === 'missing-output') {
@@ -102,7 +159,8 @@ if (scenario === 'wrong-page-ids') {
 }
 
 if (scenario === 'result-overflow') {
-  if (outputPath) fs.writeFileSync(outputPath, 'x'.repeat(2_048), { mode: 0o600 })
+  if (outputPath)
+    fs.writeFileSync(outputPath, 'x'.repeat(2_048), { mode: 0o600 })
   event({ type: 'turn.completed' })
   process.exit(0)
 }

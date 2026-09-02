@@ -16,6 +16,8 @@
   - [Setup Env Vars](#setup-env-vars)
   - [Extract Kindle Book](#extract-kindle-book)
   - [Transcribe Book Content](#transcribe-book-content)
+  - [Screenshot Pipeline: Capture + Analyze (Codex or Claude Code CLI)](#screenshot-pipeline-capture--analyze-codex-or-claude-code-cli)
+    - [Reprocess a Captured Book](#reprocess-a-captured-book)
   - [(Optional) Export Book as PDF](#optional-export-book-as-pdf)
   - [(Optional) Export Book as EPUB](#optional-export-book-as-epub)
   - [(Optional) Export Book as Markdown](#optional-export-book-as-markdown)
@@ -221,6 +223,54 @@ npx tsx src/transcribe-book-content.ts
 - Example: [examples/B0819W19WD/content.json](./examples/B0819W19WD/content.json)
 
 Useful overrides (see [`.env.example`](./.env.example)): `CODEX_MODEL` (Codex's default if unset), `CODEX_BATCH_SIZE`, `CODEX_CONCURRENCY`, `CODEX_TIMEOUT_MS`, and `ALLOW_PARTIAL`.
+
+### Screenshot Pipeline: Capture + Analyze (Codex or Claude Code CLI)
+
+Amazon has removed the metadata endpoints that `extract-kindle-book.ts` relies on, so there is also a standalone pipeline that works purely from what the Kindle web reader renders on screen. It has two phases:
+
+1. **Capture** — `src/capture-book-text.ts` opens the reader with the persistent browser profile in `out/${asin}/data`, pages through the book, and saves each rendered page to `out/${asin}/text-capture/page-####.png` (resumable; stops automatically at the end of the book).
+2. **Analyze** — each page PNG is sent to a locally installed multimodal CLI, which transcribes the text as Markdown (preserving headings and emphasis) and describes every figure, chart, formula, table, and image. Results are saved as `text-capture/page-####.json`, each visual is cropped into `text-capture/assets/`, and everything is assembled into `out/${asin}/book-text.md`.
+
+```sh
+# capture only (smoke test: first 5 pages)
+ASIN=B0819W19WD MAX_PAGES=5 npx tsx src/capture-book-text.ts
+
+# capture the whole book and analyze it in one go
+ASIN=B0819W19WD MAX_PAGES=100000 OCR=1 npx tsx src/capture-book-text.ts
+```
+
+Two analysis backends are supported; pick one with `ANALYZER`:
+
+- `ANALYZER=codex` (default) uses the [Codex CLI](https://github.com/openai/codex) (`codex exec`). Requires `codex login`. Tune with `CODEX_BIN`, `CODEX_MODEL`, `CODEX_REASONING_EFFORT` (default `xhigh`), and `CODEX_TIMEOUT_MS`.
+- `ANALYZER=claude` uses the [Claude Code CLI](https://docs.claude.com/en/docs/claude-code) (`claude -p`). Requires `claude auth login`. Tune with `CLAUDE_CLI_BIN`, `CLAUDE_CLI_MODEL`, `CLAUDE_CLI_EFFORT` (default `high`; use `xhigh`/`max` when your model supports it), and `CLAUDE_CLI_TIMEOUT_MS`. Each page runs in a locked-down print-mode session (`--safe-mode`, read-only `Read` tool, no MCP servers, no session persistence), so your normal Claude Code configuration is not involved.
+
+Neither backend uses `OPENAI_API_KEY` or an Anthropic API key directly; both go through the CLI's own login.
+
+#### Reprocess a Captured Book
+
+Once the pages are on disk you can rerun (or redo) the analysis phase at any time without opening a browser:
+
+```sh
+# resume: analyze only pages that do not have a result yet
+ASIN=B0819W19WD npx tsx src/analyze-book-text.ts
+
+# same, using the Claude Code CLI
+ASIN=B0819W19WD ANALYZER=claude npx tsx src/analyze-book-text.ts
+
+# reprocess: re-analyze EVERY page, replacing the existing results
+ASIN=B0819W19WD ANALYZER=claude REPROCESS=1 npx tsx src/analyze-book-text.ts
+
+# reprocess only some pages (ranges and single pages, 1-based)
+ASIN=B0819W19WD REPROCESS=1 PAGES=1-20,45 npx tsx src/analyze-book-text.ts
+```
+
+- Pick the model per backend with `CODEX_MODEL` (for example `gpt-5.6-sol`) or `CLAUDE_CLI_MODEL` (an alias such as `opus`, or a full name such as `claude-opus-5`). Leave them empty to use each CLI's default. The run logs the model it is using, and a model the CLI does not accept fails the page with the CLI's own reason.
+- `REPROCESS=1` re-analyzes pages that already have a `page-####.json`; without it the run resumes and only fills in missing pages.
+- `PAGES=` limits which pages may be sent to the model. Pages outside the selection keep their existing results.
+- Transient failures (rate limits, network blips, Codex models-cache errors, timeouts) are retried up to 3 times with backoff. Failures that cannot fix themselves, such as a rejected model name or a logged-out CLI, fail the page immediately.
+- A page's previous result is only replaced after a successful analysis, so a failed page never loses data. A page that fails without a previous result is never silently dropped: `book-text.md` gets a clearly flagged gap with the page image embedded, no JSON is cached, and a plain rerun retries it. Failed pages are listed at the end together with a ready-to-use `PAGES=` value, and the script exits non-zero.
+- Every `page-####.json` records which backend, model, and effort produced it (`analyzer` field), so mixed or repeated runs stay auditable.
+- `book-text.md` and the crops in `text-capture/assets/` are rebuilt from the per-page JSON on every run.
 
 ### (Optional) Export Book as PDF
 

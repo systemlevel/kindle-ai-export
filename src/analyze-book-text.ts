@@ -108,7 +108,8 @@ async function main(): Promise<void> {
     if (summary.failed > 0) {
       console.error(
         `[analyze] ${summary.failed} page(s) failed: ` +
-          `${formatPageList(summary.failedPages)}. Rerun with ` +
+          `${formatPageList(summary.failedPages)}. They are flagged as gaps ` +
+          'in book-text.md with their page images preserved. Rerun with ' +
           `PAGES=${formatPageList(summary.failedPages)} to retry just those.`
       )
       process.exitCode = 1

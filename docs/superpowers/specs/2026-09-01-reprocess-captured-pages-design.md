@@ -102,7 +102,9 @@ claude -p
 - Default (no `REPROCESS`): resume. Pages with a readable `page-####.json` are reused; pages without one are analyzed.
 - `REPROCESS=1`: every eligible page is re-analyzed even when a cached JSON exists.
 - `PAGES=1-20,45`: restricts which pages may hit the model. Pages outside the selection reuse their cached JSON if present and are otherwise skipped with a warning (they are omitted from `book-text.md` until analyzed).
+- Each page gets up to 3 attempts with linear backoff (3 s, 6 s). An analyzer can mark a failure as not retryable (`PageAnalysisError.retryable === false`, e.g. a rejected `--model` or an authentication error, classified with the Codex runner's `classifyServiceFailure`) so the page fails at once instead of wasting retries.
 - A cached JSON is only replaced after a successful analysis; a failed page keeps its previous result, and the failed page numbers are listed in the final summary.
+- A page with no result (failed with nothing cached, or excluded by `PAGES` with nothing cached) is never silently dropped: `book-text.md` gets a flagged gap section that embeds the preserved full-page image (ported from upstream commit c75afea). No JSON is written for it, so a rerun retries it.
 - `book-text.md` and the crops are always rebuilt from the per-page JSON, exactly as today.
 
 ### Page JSON format
@@ -145,7 +147,7 @@ All analysis-phase logs use the `[analyze]` prefix. At startup the phase logs th
 
 - Missing capture directory or zero page PNGs: fail fast with the expected path.
 - Preflight failure: fail fast before touching any page.
-- Per-page failure: log, keep going, keep the old JSON, report at the end.
+- Per-page failure: retry when retryable, then log, keep going, keep the old JSON (or emit a gap section), report at the end.
 - Invalid configuration (`ANALYZER` outside the enum, malformed `PAGES`, non-integer timeouts): throw at startup with the variable name.
 
 ### Testing

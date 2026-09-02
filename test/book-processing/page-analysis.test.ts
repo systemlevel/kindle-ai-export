@@ -6,6 +6,7 @@ import sharp from 'sharp'
 import { afterEach, describe, expect, test } from 'vitest'
 
 import {
+  PageAnalysisError,
   type PageAnalyzer,
   parsePageSelection,
   runAnalysisPhase
@@ -75,9 +76,15 @@ async function readCachedResult(
 }
 
 function fakeAnalyzer(
-  options: { failOn?: number[] } = {}
+  options: {
+    failOn?: number[]
+    /** Fail this many attempts for a page before succeeding. */
+    transientFailures?: number
+    nonRetryable?: boolean
+  } = {}
 ): PageAnalyzer & { calls: string[] } {
   const calls: string[] = []
+  const attempts = new Map<number, number>()
   return {
     backend: 'codex',
     identity: { backend: 'codex', model: null, effort: 'xhigh' },
@@ -88,13 +95,23 @@ function fakeAnalyzer(
       const file = path.basename(pngPath)
       calls.push(file)
       const page = Number(/page-(\d+)\.png$/.exec(file)![1])
+      const attempt = (attempts.get(page) ?? 0) + 1
+      attempts.set(page, attempt)
       if (options.failOn?.includes(page)) {
-        throw new Error(`boom on page ${page}`)
+        throw new PageAnalysisError(`boom on page ${page}`, {
+          retryable: !options.nonRetryable
+        })
+      }
+      if (options.transientFailures && attempt <= options.transientFailures) {
+        throw new Error(`transient failure ${attempt} on page ${page}`)
       }
       return { text: `fresh text ${page}`, visuals: [] }
     }
   }
 }
+
+// Tests never wait for the real 3 s backoff.
+const fastRetry = { retryBaseDelayMs: 1 }
 
 const silentLog = { info: () => undefined, warn: () => undefined }
 
@@ -191,8 +208,14 @@ describe('runAnalysisPhase', () => {
       skipped: 1,
       skippedPages: [4]
     })
-    expect(await fs.readFile(bookTextPath, 'utf8')).toBe(
-      'fresh text 1\n\n---\n\nfresh text 2\n\n---\n\ncached text 3\n'
+    const markdown = await fs.readFile(bookTextPath, 'utf8')
+    expect(markdown).toMatch(
+      /^fresh text 1\n\n---\n\nfresh text 2\n\n---\n\ncached text 3\n\n---\n\n/
+    )
+    // Never silently drop a page: the skipped page is flagged in place.
+    expect(markdown).toContain('Page 4: not analyzed')
+    expect(markdown).toContain(
+      '![Page 4 (not transcribed)](text-capture/assets/page-0004-full.png)'
     )
   })
 
@@ -206,7 +229,8 @@ describe('runAnalysisPhase', () => {
       bookTextPath,
       analyzer,
       reprocess: true,
-      log: silentLog
+      log: silentLog,
+      ...fastRetry
     })
 
     expect(summary).toMatchObject({
@@ -221,6 +245,83 @@ describe('runAnalysisPhase', () => {
     expect(await fs.readFile(bookTextPath, 'utf8')).toBe(
       'cached text 1\n\n---\n\nfresh text 2\n'
     )
+  })
+
+  test('retries a transient failure with backoff before succeeding', async () => {
+    const { captureDir, bookTextPath } = await createCaptureFixture(1)
+    const analyzer = fakeAnalyzer({ transientFailures: 2 })
+
+    const summary = await runAnalysisPhase({
+      captureDir,
+      bookTextPath,
+      analyzer,
+      log: silentLog,
+      ...fastRetry
+    })
+
+    expect(analyzer.calls).toHaveLength(3)
+    expect(summary).toMatchObject({ analyzed: 1, failed: 0, failedPages: [] })
+    expect(await fs.readFile(bookTextPath, 'utf8')).toBe('fresh text 1\n')
+  })
+
+  test('gives up after the configured attempts and reports the page', async () => {
+    const { captureDir, bookTextPath } = await createCaptureFixture(1)
+    const analyzer = fakeAnalyzer({ transientFailures: 99 })
+
+    const summary = await runAnalysisPhase({
+      captureDir,
+      bookTextPath,
+      analyzer,
+      retryAttempts: 2,
+      log: silentLog,
+      ...fastRetry
+    })
+
+    expect(analyzer.calls).toHaveLength(2)
+    expect(summary).toMatchObject({ analyzed: 0, failed: 1, failedPages: [1] })
+  })
+
+  test('does not retry a failure the analyzer marks as not retryable', async () => {
+    const { captureDir, bookTextPath } = await createCaptureFixture(1)
+    const analyzer = fakeAnalyzer({ failOn: [1], nonRetryable: true })
+
+    const summary = await runAnalysisPhase({
+      captureDir,
+      bookTextPath,
+      analyzer,
+      log: silentLog,
+      ...fastRetry
+    })
+
+    expect(analyzer.calls).toHaveLength(1)
+    expect(summary).toMatchObject({ failed: 1, failedPages: [1] })
+  })
+
+  test('renders a visible gap with the page image when a page fails without a cached result', async () => {
+    const { captureDir, bookTextPath } = await createCaptureFixture(2)
+    const analyzer = fakeAnalyzer({ failOn: [1], nonRetryable: true })
+
+    await runAnalysisPhase({
+      captureDir,
+      bookTextPath,
+      analyzer,
+      log: silentLog,
+      ...fastRetry
+    })
+
+    const markdown = await fs.readFile(bookTextPath, 'utf8')
+    expect(markdown).toContain('Page 1: automated analysis FAILED')
+    expect(markdown).toContain(
+      '![Page 1 (not transcribed)](text-capture/assets/page-0001-full.png)'
+    )
+    expect(markdown).toContain('fresh text 2')
+    await expect(
+      fs.access(path.join(captureDir, 'assets', 'page-0001-full.png'))
+    ).resolves.toBeUndefined()
+    // No JSON is cached for a failed page, so a plain rerun retries it.
+    await expect(
+      fs.access(path.join(captureDir, 'page-0001.json'))
+    ).rejects.toThrow()
   })
 
   test('an unreadable cached result is re-analyzed', async () => {

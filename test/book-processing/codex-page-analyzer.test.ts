@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 
 import { createCodexPageAnalyzer } from '../../src/book-processing/codex-page-analyzer'
 import {
+  PageAnalysisError,
   pageAnalysisOutputSchema,
   pageAnalysisPrompt
 } from '../../src/book-processing/page-analysis'
@@ -173,6 +174,25 @@ describe('createCodexPageAnalyzer', () => {
       /'not-a-real-model' model is not supported when using Codex/
     )
     expect(message).not.toMatch(/cache TTL|stdin/)
+    // A rejected model never fixes itself; retrying would waste minutes per page.
+    expect(failure).toBeInstanceOf(PageAnalysisError)
+    expect((failure as PageAnalysisError).retryable).toBe(false)
+  })
+
+  test('treats a rate-limited turn as retryable', async () => {
+    const { pngPath, env } = await fixture('rate-limit')
+    const analyzer = createCodexPageAnalyzer({
+      codexBin: fixturePath,
+      reasoningEffort: 'xhigh',
+      timeoutMs: 5000,
+      env
+    })
+    const failure = await analyzer
+      .analyzePage(pngPath)
+      .catch((err: Error) => err)
+    expect(failure).toBeInstanceOf(PageAnalysisError)
+    expect((failure as PageAnalysisError).message).toMatch(/rate limit/)
+    expect((failure as PageAnalysisError).retryable).toBe(true)
   })
 
   test('terminates a hung process after the timeout', async () => {

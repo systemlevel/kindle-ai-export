@@ -5,8 +5,10 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { diagnosticSample, runCliProcess } from './cli-process'
+import { classifyServiceFailure } from './codex-runner'
 import {
   coercePageResult,
+  PageAnalysisError,
   pageAnalysisOutputSchema,
   pageAnalysisPrompt,
   type PageAnalyzer,
@@ -212,22 +214,31 @@ async function analyzePageWithClaude(
     )
 
     if (run.spawnError) {
-      throw new Error(
-        `could not start the claude CLI (${options.claudeBin}): ${run.spawnError.message}`
+      throw new PageAnalysisError(
+        `could not start the claude CLI (${options.claudeBin}): ${run.spawnError.message}`,
+        { retryable: false }
       )
     }
     if (run.timedOut) {
-      throw new Error(`claude timed out after ${options.timeoutMs}ms`)
+      throw new PageAnalysisError(
+        `claude timed out after ${options.timeoutMs}ms`
+      )
     }
     if (run.overflow) {
-      throw new Error(`claude ${run.overflow} exceeded its size limit`)
+      throw new PageAnalysisError(
+        `claude ${run.overflow} exceeded its size limit`
+      )
     }
     if (run.exitCode !== 0) {
       const sample = diagnosticSample(run.stderr || run.stdout)
-      throw new Error(
+      throw new PageAnalysisError(
         `claude exited with code ${run.exitCode}` +
           (run.signal ? ` (signal ${run.signal})` : '') +
-          (sample ? `: ${sample}` : '')
+          (sample ? `: ${sample}` : ''),
+        {
+          retryable:
+            classifyServiceFailure(run.stderr || run.stdout) !== 'configuration'
+        }
       )
     }
 
@@ -244,10 +255,15 @@ async function analyzePageWithClaude(
     const resultText =
       typeof envelope.result === 'string' ? envelope.result.trim() : ''
     if (envelope.is_error) {
-      throw new Error(
+      // Auth/config problems and rejected models do not fix themselves; only
+      // transient service errors are worth another attempt.
+      throw new PageAnalysisError(
         `claude reported an error: ${
           diagnosticSample(resultText, resultMessageMaxLength) || '(no message)'
-        }`
+        }`,
+        {
+          retryable: classifyServiceFailure(resultText) === 'transient-service'
+        }
       )
     }
     if (envelope.subtype && envelope.subtype !== 'success') {

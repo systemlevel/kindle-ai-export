@@ -1,5 +1,6 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { setTimeout as sleep } from 'node:timers/promises'
 
 import sharp from 'sharp'
 
@@ -39,8 +40,33 @@ export interface PageAnalyzer {
   describe(): string
   /** Verifies the CLI is installed and authenticated; throws otherwise. */
   preflight(): Promise<void>
-  /** Analyzes one absolute page PNG path. Throws on failure. */
+  /** Analyzes one absolute page PNG path. Throws on failure — a
+   * {@link PageAnalysisError} with `retryable: false` when another attempt
+   * cannot help (rejected model, auth failure); anything else is retried. */
   analyzePage(pngPath: string): Promise<PageResult>
+}
+
+/**
+ * Failure of one page analysis. `retryable` tells the phase whether another
+ * attempt could plausibly succeed: transient service errors, timeouts and
+ * flaky output are retried with backoff, while a rejected `--model` or an
+ * authentication failure fails the page immediately instead of burning
+ * minutes of futile retries on every page of a book.
+ */
+export class PageAnalysisError extends Error {
+  readonly retryable: boolean
+
+  constructor(
+    message: string,
+    options: { retryable?: boolean; cause?: unknown } = {}
+  ) {
+    super(
+      message,
+      options.cause === undefined ? undefined : { cause: options.cause }
+    )
+    this.name = 'PageAnalysisError'
+    this.retryable = options.retryable ?? true
+  }
 }
 
 // Structured OCR + visual-analysis prompt. The backend returns JSON (validated
@@ -185,6 +211,10 @@ export interface AnalysisPhaseOptions {
   reprocess?: boolean
   /** When set, only these page numbers may be sent to the analyzer. */
   pages?: ReadonlySet<number>
+  /** Attempts per page before it is flagged as failed. Default 3. */
+  retryAttempts?: number
+  /** Backoff between attempts is `retryBaseDelayMs * attempt`. Default 3 s. */
+  retryBaseDelayMs?: number
   log?: AnalysisLogger
 }
 
@@ -210,6 +240,11 @@ const minCropPx = 24
 // Upper bound on a single PAGES range so a typo cannot allocate millions of
 // entries.
 const maxSelectionSpan = 100_000
+// Analyzers can fail transiently (models-cache TTL errors, rate limits,
+// network blips). Retry a page this many times, backing off by this base delay
+// per attempt, before flagging it as a failed page in the output.
+const defaultRetryAttempts = 3
+const defaultRetryBaseDelayMs = 3000
 
 export const defaultAnalysisLogger: AnalysisLogger = {
   info: (message) => console.log(`[analyze] ${message}`),
@@ -327,6 +362,8 @@ export async function runAnalysisPhase(
     analyzer,
     reprocess = false,
     pages,
+    retryAttempts = defaultRetryAttempts,
+    retryBaseDelayMs = defaultRetryBaseDelayMs,
     log = defaultAnalysisLogger
   } = options
 
@@ -396,11 +433,24 @@ export async function runAnalysisPhase(
           `(${eligible ? 'resume' : 'outside page selection'})`
       )
     } else if (!eligible) {
+      // NEVER silently drop a page: flag the gap in place with its image.
       skipped += 1
       skippedPages.push(pageNumber)
       log.warn(
-        `${file}: no cached result and outside page selection — skipped ` +
-          '(not included in book-text.md until analyzed)'
+        `${file}: no cached result and outside page selection — not ` +
+          'analyzed; flagged as a gap in book-text.md'
+      )
+      sections.push(
+        await renderGapSection({
+          pageNumber,
+          pad,
+          pngPath,
+          assetsDir,
+          outDir,
+          headline: 'not analyzed (outside the PAGES selection)',
+          advice:
+            'Re-run without PAGES (or with this page included) to analyze it.'
+        })
       )
       continue
     } else {
@@ -410,10 +460,17 @@ export async function runAnalysisPhase(
           '...'
       )
       const started = Date.now()
-      try {
-        const fresh = await analyzer.analyzePage(path.resolve(pngPath))
+      const outcome = await analyzeWithRetries({
+        analyzer,
+        pngPath: path.resolve(pngPath),
+        file,
+        retryAttempts,
+        retryBaseDelayMs,
+        log
+      })
+      if (outcome.ok) {
         result = {
-          ...fresh,
+          ...outcome.result,
           analyzer: {
             ...analyzer.identity,
             analyzedAt: new Date().toISOString()
@@ -421,16 +478,35 @@ export async function runAnalysisPhase(
         }
         await fs.writeFile(jsonPath, `${JSON.stringify(result, null, 2)}\n`)
         analyzed += 1
-        log.info(`${file}: analyzed in ${formatDuration(Date.now() - started)}`)
-      } catch (err) {
+        log.info(
+          `${file}: analyzed in ${formatDuration(Date.now() - started)}` +
+            (outcome.attempts > 1 ? ` (attempt ${outcome.attempts})` : '')
+        )
+      } else {
         failed += 1
         failedPages.push(pageNumber)
         log.warn(
-          `${file}: FAILED after ${formatDuration(Date.now() - started)} — ` +
-            `${(err as Error).message}` +
-            (cached ? '; keeping previous cached result' : '')
+          `${file}: FAILED after ${outcome.attempts} attempt(s), ` +
+            `${formatDuration(Date.now() - started)} — ${outcome.error.message}` +
+            (cached
+              ? '; keeping previous cached result'
+              : '; flagged as a gap in book-text.md (no result cached, so a ' +
+                'rerun retries it)')
         )
-        if (!cached) continue
+        if (!cached) {
+          sections.push(
+            await renderGapSection({
+              pageNumber,
+              pad,
+              pngPath,
+              assetsDir,
+              outDir,
+              headline: 'automated analysis FAILED',
+              advice: 'Re-run the analysis to retry only this page.'
+            })
+          )
+          continue
+        }
         result = cached
       }
     }
@@ -465,14 +541,15 @@ export async function runAnalysisPhase(
   )
   if (failedPages.length > 0) {
     log.warn(
-      `failed page(s): ${formatPageList(failedPages)} — rerun with ` +
-        `PAGES=${formatPageList(failedPages)} to retry just those`
+      `failed page(s): ${formatPageList(failedPages)} — flagged as gaps in ` +
+        `${path.basename(bookTextPath)} with their page images preserved; ` +
+        `rerun with PAGES=${formatPageList(failedPages)} to retry just those`
     )
   }
   if (skippedPages.length > 0) {
     log.warn(
       `skipped page(s) without results: ${formatPageList(skippedPages)} — ` +
-        'they are missing from book-text.md until analyzed'
+        `flagged as gaps in ${path.basename(bookTextPath)} until analyzed`
     )
   }
   log.info(
@@ -490,6 +567,96 @@ export async function runAnalysisPhase(
     skippedPages,
     outputPath: bookTextPath
   }
+}
+
+interface RetryInput {
+  analyzer: PageAnalyzer
+  pngPath: string
+  file: string
+  retryAttempts: number
+  retryBaseDelayMs: number
+  log: AnalysisLogger
+}
+
+type RetryOutcome =
+  | { ok: true; result: PageResult; attempts: number }
+  | { ok: false; error: Error; attempts: number }
+
+/** Runs the analyzer with linear backoff. Stops early when the analyzer says
+ * another attempt cannot help (`PageAnalysisError.retryable === false`). */
+async function analyzeWithRetries(input: RetryInput): Promise<RetryOutcome> {
+  const { analyzer, pngPath, file, retryAttempts, retryBaseDelayMs, log } =
+    input
+  const attempts = Math.max(1, retryAttempts)
+  let lastError: Error = new Error('analysis did not run')
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const result = await analyzer.analyzePage(pngPath)
+      return { ok: true, result, attempts: attempt }
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err))
+      const retryable =
+        !(lastError instanceof PageAnalysisError) || lastError.retryable
+      if (!retryable) {
+        log.warn(`${file}: attempt ${attempt} failed and is not retryable`)
+        return { ok: false, error: lastError, attempts: attempt }
+      }
+      if (attempt < attempts) {
+        const backoffMs = retryBaseDelayMs * attempt
+        log.warn(
+          `${file}: attempt ${attempt}/${attempts} failed ` +
+            `(${lastError.message}); retrying in ${formatDuration(backoffMs)}`
+        )
+        await sleep(backoffMs)
+      }
+    }
+  }
+  return { ok: false, error: lastError, attempts }
+}
+
+interface GapSectionInput {
+  pageNumber: number
+  pad: string
+  pngPath: string
+  assetsDir: string
+  outDir: string
+  /** e.g. "automated analysis FAILED" */
+  headline: string
+  advice: string
+}
+
+/**
+ * Markdown for a page that has no analysis result (failed, or excluded by the
+ * page selection). We never drop the page: the original captured image is
+ * preserved as an asset and embedded, so the content is still there for a
+ * human (or a later pass) to read, and the gap is clearly flagged rather than
+ * silently missing.
+ */
+async function renderGapSection(input: GapSectionInput): Promise<string> {
+  const { pageNumber, pad, pngPath, assetsDir, outDir, headline, advice } =
+    input
+  const fullAssetAbs = path.join(assetsDir, `page-${pad}-full.png`)
+  let rel: string | undefined
+  try {
+    await fs.copyFile(pngPath, fullAssetAbs)
+    rel = path.relative(outDir, fullAssetAbs).split(path.sep).join('/')
+  } catch (err) {
+    console.warn(
+      `[analyze] page ${pageNumber}: could not preserve full page image — ` +
+        `${(err as Error).message}`
+    )
+  }
+
+  const lines = [
+    `> **⚠️ Page ${pageNumber}: ${headline} — text not transcribed.**`,
+    '>',
+    '> The captured page image is preserved below so no content is lost. ' +
+      advice
+  ]
+  if (rel) {
+    lines.push('', `![Page ${pageNumber} (not transcribed)](${rel})`)
+  }
+  return lines.join('\n')
 }
 
 interface RenderPageInput {

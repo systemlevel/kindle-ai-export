@@ -14,6 +14,7 @@ import path from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 
 import {
+  classifyServiceFailure,
   type CodexBatchInput,
   inspectCodexInstallation,
   runCodexBatch
@@ -121,6 +122,30 @@ describe('failure diagnostics', () => {
     expect(failure.message).not.toContain('\n')
     expect(failure.message.length).toBeLessThanOrEqual(1000)
     expect(sanitizeDiagnostic('a\r\nb', [])).toBe('a b')
+  })
+})
+
+describe('classifyServiceFailure', () => {
+  test.each([
+    // Regression guard: `--ignore-user-config` must NOT be treated as a
+    // configuration fault, which would abort the whole run.
+    ['--ignore-user-config', 'protocol'],
+    ['unknown flag --ignore-user-config', 'protocol'],
+    ['some unexpected parse error', 'protocol'],
+    [
+      'failed to renew cache TTL: missing field `supports_parallel_tool_calls`',
+      'transient-service'
+    ],
+    ['failed to load models cache', 'transient-service'],
+    ['ECONNRESET', 'transient-service'],
+    ['socket hang up', 'transient-service'],
+    ['429 Too Many Requests', 'transient-service'],
+    ['503 Service Unavailable', 'transient-service'],
+    ['rate limit exceeded', 'transient-service'],
+    ['Not logged in', 'configuration'],
+    ['invalid api key', 'configuration']
+  ] as const)('classifies %j as %s', (message, category) => {
+    expect(classifyServiceFailure(message)).toBe(category)
   })
 })
 

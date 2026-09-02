@@ -5,8 +5,12 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { diagnosticSample, runCliProcess } from './cli-process'
-import { inspectCodexInstallation } from './codex-runner'
 import {
+  classifyServiceFailure,
+  inspectCodexInstallation
+} from './codex-runner'
+import {
+  PageAnalysisError,
   pageAnalysisOutputSchema,
   pageAnalysisPrompt,
   type PageAnalyzer,
@@ -136,29 +140,42 @@ async function analyzePageWithCodex(
     )
 
     if (run.spawnError) {
-      throw new Error(
-        `could not start the codex CLI (${options.codexBin}): ${run.spawnError.message}`
+      throw new PageAnalysisError(
+        `could not start the codex CLI (${options.codexBin}): ${run.spawnError.message}`,
+        { retryable: false }
       )
     }
     if (run.timedOut) {
-      throw new Error(`codex timed out after ${options.timeoutMs}ms`)
+      throw new PageAnalysisError(
+        `codex timed out after ${options.timeoutMs}ms`
+      )
     }
     if (run.overflow) {
-      throw new Error(`codex ${run.overflow} exceeded its size limit`)
+      throw new PageAnalysisError(
+        `codex ${run.overflow} exceeded its size limit`
+      )
     }
     // The JSONL event stream carries the real reason for a failed turn (an
     // unsupported --model, a rate limit, ...); stderr is mostly unrelated
-    // noise, so report the event reason first.
+    // noise, so report the event reason first. Only transient service
+    // failures are worth retrying; a rejected model or auth problem is not.
     const events = scanCodexEvents(run.stdout)
     if (events.failureReason) {
-      throw new Error(`codex turn failed: ${events.failureReason}`)
+      throw new PageAnalysisError(
+        `codex turn failed: ${events.failureReason}`,
+        {
+          retryable:
+            classifyServiceFailure(events.failureReason) === 'transient-service'
+        }
+      )
     }
     if (run.exitCode !== 0) {
       const sample = diagnosticSample(run.stderr)
-      throw new Error(
+      throw new PageAnalysisError(
         `codex exited with code ${run.exitCode}` +
           (run.signal ? ` (signal ${run.signal})` : '') +
-          (sample ? `: ${sample}` : '')
+          (sample ? `: ${sample}` : ''),
+        { retryable: classifyServiceFailure(run.stderr) !== 'configuration' }
       )
     }
     if (!events.turnCompleted) {

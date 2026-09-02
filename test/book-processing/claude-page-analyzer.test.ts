@@ -9,6 +9,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 
 import { createClaudePageAnalyzer } from '../../src/book-processing/claude-page-analyzer'
 import {
+  PageAnalysisError,
   pageAnalysisOutputSchema,
   pageAnalysisPrompt
 } from '../../src/book-processing/page-analysis'
@@ -209,9 +210,15 @@ describe('createClaudePageAnalyzer', () => {
       timeoutMs: 5000,
       env
     })
-    await expect(analyzer.analyzePage(pngPath)).rejects.toThrow(
+    const failure = await analyzer
+      .analyzePage(pngPath)
+      .catch((err: Error) => err)
+    expect(failure).toBeInstanceOf(PageAnalysisError)
+    expect((failure as PageAnalysisError).message).toMatch(
       /Failed to authenticate/
     )
+    // An auth failure will not fix itself between attempts.
+    expect((failure as PageAnalysisError).retryable).toBe(false)
   })
 
   test('rejects when the result subtype is not success', async () => {

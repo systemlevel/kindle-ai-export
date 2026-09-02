@@ -516,16 +516,30 @@ function failureFromExecution(
   return null
 }
 
-function classifyServiceFailure(message: string): ProcessingFailureCategory {
+// `configuration` failures ABORT THE WHOLE RUN immediately (no retry), so
+// this classification is deliberately conservative: only messages that look
+// like a genuine auth/config fault qualify. In particular, the mere presence
+// of the substring "config" must NOT trigger it -- our own codex invocation
+// passes `--ignore-user-config`, and codex's models-cache diagnostics also
+// mention "config" in passing, none of which should nuke a long book run.
+export function classifyServiceFailure(
+  message: string
+): ProcessingFailureCategory {
   const normalized = message.toLowerCase()
   if (
-    /rate limit|temporar(?:y|ily)|network|backend|service unavailable|overloaded/.test(
+    /rate limit|temporar(?:y|ily)|network|backend|service unavailable|overloaded|models? cache|cache ttl|renew cache|connection reset|econnreset|etimedout|socket hang up|connection refused|\b429\b|too many requests|\b(?:500|502|503|504)\b|gateway|\bunavailable\b/.test(
       normalized
     )
   ) {
     return 'transient-service'
   }
-  if (/not logged|auth|api key|config/.test(normalized)) return 'configuration'
+  if (
+    /not logged in|login required|codex login|unauthorized|authentication (?:failed|error)|no auth\b|invalid api key|api key|config\.toml|configuration error/.test(
+      normalized
+    )
+  ) {
+    return 'configuration'
+  }
   return 'protocol'
 }
 

@@ -267,7 +267,8 @@ ASIN=B0819W19WD REPROCESS=1 PAGES=1-20,45 npx tsx src/analyze-book-text.ts
 - Pick the model per backend with `CODEX_MODEL` (for example `gpt-5.6-sol`) or `CLAUDE_CLI_MODEL` (an alias such as `opus`, or a full name such as `claude-opus-5`). Leave them empty to use each CLI's default. The run logs the model it is using, and a model the CLI does not accept fails the page with the CLI's own reason.
 - `REPROCESS=1` re-analyzes pages that already have a `page-####.json`; without it the run resumes and only fills in missing pages.
 - `PAGES=` limits which pages may be sent to the model. Pages outside the selection keep their existing results.
-- A page's previous result is only replaced after a successful analysis, so a failed page never loses data. Failed pages are listed at the end together with a ready-to-use `PAGES=` value to retry them, and the script exits non-zero.
+- Transient failures (rate limits, network blips, Codex models-cache errors, timeouts) are retried up to 3 times with backoff. Failures that cannot fix themselves, such as a rejected model name or a logged-out CLI, fail the page immediately.
+- A page's previous result is only replaced after a successful analysis, so a failed page never loses data. A page that fails without a previous result is never silently dropped: `book-text.md` gets a clearly flagged gap with the page image embedded, no JSON is cached, and a plain rerun retries it. Failed pages are listed at the end together with a ready-to-use `PAGES=` value, and the script exits non-zero.
 - Every `page-####.json` records which backend, model, and effort produced it (`analyzer` field), so mixed or repeated runs stay auditable.
 - `book-text.md` and the crops in `text-capture/assets/` are rebuilt from the per-page JSON on every run.
 

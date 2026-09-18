@@ -18,6 +18,7 @@
   - [Transcribe Book Content](#transcribe-book-content)
   - [Screenshot Pipeline: Capture + Analyze (Codex or Claude Code CLI)](#screenshot-pipeline-capture--analyze-codex-or-claude-code-cli)
     - [Reprocess a Captured Book](#reprocess-a-captured-book)
+  - [Process a PDF Book](#process-a-pdf-book)
   - [(Optional) Export Book as PDF](#optional-export-book-as-pdf)
   - [(Optional) Export Book as EPUB](#optional-export-book-as-epub)
   - [(Optional) Export Book as Markdown](#optional-export-book-as-markdown)
@@ -33,6 +34,8 @@
 This project makes it easy to export the contents of any ebook in your Kindle library as text, PDF, EPUB, or as a custom, AI-narrated audiobook. It only requires a valid Amazon Kindle account and a locally installed, authenticated [Codex CLI](https://github.com/openai/codex). An OpenAI API key is only needed if you want to generate an AI-narrated audiobook using OpenAI's TTS.
 
 _You must own the ebook on Kindle for this project to work._
+
+For books you already have as local PDF files, use the separate [PDF workflow](#process-a-pdf-book). It renders PDF pages and analyzes their text and graphics without a Kindle account or browser session.
 
 ### How does it work?
 
@@ -279,6 +282,61 @@ ASIN=B0819W19WD REPROCESS=1 PAGES=1-20,45 npx tsx src/analyze-book-text.ts
 - A page's previous result is only replaced after a successful analysis, so a failed page never loses data. A page that fails without a previous result is never silently dropped: `book-text.md` gets a clearly flagged gap with the page image embedded, no JSON is cached, and a plain rerun retries it. Failed pages are listed at the end together with a ready-to-use `PAGES=` value, and the script exits non-zero.
 - Every `page-####.json` records which backend, model, and effort produced it (`analyzer` field), so mixed or repeated runs stay auditable.
 - `book-text.md` and the crops in `text-capture/assets/` are rebuilt from the per-page JSON on every run.
+
+### Process a PDF Book
+
+`src/capture-pdf-text.ts` imports a local PDF through the same page-image analysis used by `capture-book-text.ts`. This is a separate entry point; the existing Kindle capture commands and behavior are unchanged. Both PDFs with selectable text and scanned books are processed as page images, so the analyzer can transcribe text and interpret charts, graphs, diagrams, formulas, tables, and other visuals in context. Visuals are described and preserved as image crops through the existing analysis pipeline.
+
+Install [Poppler](https://poppler.freedesktop.org/) for PDF inspection and rendering:
+
+```sh
+# macOS
+brew install poppler
+
+# Debian / Ubuntu
+sudo apt-get install poppler-utils
+```
+
+Use the same authenticated Codex or Claude Code CLI as the [screenshot pipeline](#screenshot-pipeline-capture--analyze-codex-or-claude-code-cli). The PDF workflow needs neither Amazon credentials nor an ASIN.
+
+```sh
+# render and analyze the whole PDF with Codex (the default)
+npx tsx src/capture-pdf-text.ts "/path/to/book.pdf"
+
+# choose Claude Code instead
+ANALYZER=claude npx tsx src/capture-pdf-text.ts "/path/to/book.pdf"
+
+# alternatively, provide the source through an environment variable
+PDF_FILE="/path/to/book.pdf" npx tsx src/capture-pdf-text.ts
+
+# render and save the pages without invoking an AI CLI
+CAPTURE_ONLY=1 npx tsx src/capture-pdf-text.ts "/path/to/book.pdf"
+
+# analyze previously captured pages, validating them against the same source
+ANALYZE_ONLY=1 npx tsx src/capture-pdf-text.ts "/path/to/book.pdf"
+
+# redo selected physical pages using the existing analysis controls
+ANALYZE_ONLY=1 REPROCESS=1 PAGES=1-20,45 \
+  npx tsx src/capture-pdf-text.ts "/path/to/book.pdf"
+```
+
+The default output directory is `out/pdf-<filename>-<hash>/`, where `<hash>` is the first 12 characters of the PDF's SHA-256 hash. To choose a folder name under `out/`, set `PDF_BOOK`, for example:
+
+```sh
+PDF_BOOK="My PDF Book" npx tsx src/capture-pdf-text.ts "/path/to/book.pdf"
+```
+
+Use `PDF_BOOK` for this workflow, rather than the Kindle `BOOK` or `ASIN` settings. Keep the same `PDF_BOOK` and rendering settings when resuming or using `ANALYZE_ONLY=1`.
+
+- By default, every physical PDF page is captured and analyzed, including covers and front matter. Page selections refer to 1-based physical positions in the PDF, which may differ from printed page numbers.
+- `PDF_DPI` sets the rendering resolution (default `150`; integer from `72` to `600`). Higher values produce larger page images and use more disk space.
+- `CAPTURE_ONLY=1` needs Poppler but no AI authentication. `CAPTURE_ONLY` and `ANALYZE_ONLY` cannot be enabled together.
+- `PAGES=1-20,45` restricts analysis using the same selection syntax as the Kindle analyzer. Pages without existing analysis outside the selection remain marked as gaps. `REPROCESS=1` replaces existing results only when a new analysis succeeds. The existing `ANALYZER`, `CODEX_*`, and `CLAUDE_CLI_*` analysis settings also apply.
+- The output includes a preserved `source.pdf`, a `pdf-capture.json` manifest, and rendered pages under `text-capture/page-0001.png`, etc. Page filenames use at least four digits, increasing for longer books.
+- Analysis saves each page's text, visual descriptions, and analyzer metadata to `text-capture/page-0001.json`, etc. The assembled book is `book-text.md`, with visual crops under `text-capture/assets/`. A normal rerun reuses successful per-page results and retries missing ones; the combined Markdown and assets are rebuilt from those results. Failed analysis is reported with a non-zero exit status and a marked gap when no earlier result exists.
+- The source snapshot and hashes are checked when resuming, so cached analysis is tied to the captured source. A custom output folder is rejected if it belongs to another PDF, uses a different rendering resolution, or already holds a non-PDF workflow's output. Use a new `PDF_BOOK` folder when changing source or resolution.
+- A `.pdf-capture.lock` in the book's output directory prevents simultaneous PDF runs from writing to the same book. If a process is forcibly terminated and leaves a stale lock, remove that lock only after confirming the earlier process has stopped.
+- Invalid or unreadable PDFs fail with an error. There is no password option for encrypted files that Poppler cannot open.
 
 ### (Optional) Export Book as PDF
 
